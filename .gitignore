@@ -155,3 +155,9 @@ vite.config.ts.timestamp-*
 .nx/cache
 .nx/workspace-data
 .nx/migrate-runs
+
+# 專案機敏資料
+secrets/
+.env
+*-key.json
+service-account*.json
