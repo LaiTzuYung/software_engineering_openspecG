@@ -161,3 +161,6 @@ secrets/
 .env
 *-key.json
 service-account*.json
+
+# 匯入的題目集暫存資料
+data/
