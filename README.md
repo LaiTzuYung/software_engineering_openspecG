@@ -29,4 +29,25 @@ npm test
 npm run test:unit
 ```
 
+手動執行一次匯入並查看預覽：
+
+```sh
+npm run import -- <Google 試算表網址>
+```
+
+CLI 先列出題數、單題／題組、小題標籤格與作答格位置及警告，再詢問是否建立題目集。輸入 `y` 才會把預覽寫入 `data/guided-notes/`；其他輸入會取消且不建立 JSON。Google 試算表匯入需設定 `GOOGLE_SERVICE_ACCOUNT_KEY_FILE`。`.xlsx` 路徑模式僅供離線測試：
+
+```sh
+npm run import -- tests/fixtures/guided-notes/T1-single.xlsx
+```
+
+預覽與題目集服務只接收解析器的來源無關解析結果。測試使用作業系統暫存目錄，結束時會清除，不會在 repo 留下 `data/` 測試檔。
+
+### 待與 SpecKit 組對齊
+
+- 題目敘述欄存在時擷取，沒有題目欄時留空。
+- 標籤右側候選格都有內容時，選第一格並顯示警告，老師仍可確認。
+- 標籤右側沒有可用作答格時，作答格退回標籤格。
+- 題目集確認後暫存於記憶體，並保存為 `data/guided-notes/` 下的 JSON；請確認此儲存方式與路徑。
+
 格狀資料模型與解析規則見 [Guided Notes 解析器說明](docs/guided-notes-parser.md)。

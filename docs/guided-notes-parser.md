@@ -34,3 +34,21 @@ npm run test:unit
 ```
 
 單元測試使用記憶體中的格狀資料，不連線 Google；`.xlsx` fixtures 的端對端驗收屬第 2 階段。
+
+## 預覽、確認與 CLI
+
+`GuidedNotesImportService` 接收 `ParseResult`，不依賴 Google Sheets 或 ExcelJS。預覽包含題數、單題／題組分類、每個小題的標籤格與作答格位置及解析警告。建立前資料只保留在記憶體；呼叫確認後才寫入 `data/guided-notes/<id>.json`，並保留同一題目集於記憶體。自動測試以作業系統暫存目錄驗證確認前沒有檔案、確認後 JSON 與記憶體一致，測試完成會刪除暫存資料夾。
+
+以 Google Sheets 網址執行 CLI 並預覽：
+
+```sh
+npm run import -- <Google 試算表網址>
+```
+
+CLI 顯示預覽後詢問是否確認；輸入 `y` 才會保存。`.xlsx` 路徑模式只用於離線測試，例如：
+
+```sh
+npm run import -- tests/fixtures/guided-notes/T1-single.xlsx
+```
+
+題目敘述有欄時擷取、沒有欄時留空；候選格已填時取第一格並附警告；標籤右側沒有可用格時退回標籤格。這些暫定行為及記憶體加 JSON 檔的儲存方式仍待與 SpecKit 組對齊。
