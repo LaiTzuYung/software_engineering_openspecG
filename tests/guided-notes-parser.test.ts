@@ -106,6 +106,37 @@ test("標籤編號來自標籤格，答案位置是其右方第一個空白格",
   });
 });
 
+test("題組小題沒有標籤時，依該題小題順序指派下一個編號", () => {
+  const grid = sheet(
+    [
+      ["題號", "題目", "作答", null],
+      [1, "小題一", "（1）", null],
+      [null, "小題二", null, null],
+    ],
+    [{ start: { row: 1, column: 3 }, end: { row: 1, column: 4 } }],
+  );
+  const parsed = parseGuidedNotes(grid);
+  assert.deepEqual(parsed.questions[0]?.subquestions.map(({ number }) => number), [1, 2]);
+  assert.equal(parsed.questions[0]?.subquestions[1]?.labelCell, undefined);
+});
+
+test("同一題重複解析到相同作答格時保留一格並產生警告", () => {
+  const grid = sheet(
+    [
+      ["題號", "題目", "作答", null],
+      [1, "小題一", "（1）", null],
+      [null, "小題二", "（2）", null],
+    ],
+    [
+      { start: { row: 1, column: 3 }, end: { row: 1, column: 4 } },
+      { start: { row: 2, column: 4 }, end: { row: 3, column: 4 } },
+    ],
+  );
+  const parsed = parseGuidedNotes(grid);
+  assert.equal(parsed.questions[0]?.subquestions.length, 1);
+  assert.equal(parsed.warnings.some(({ code }) => code === "duplicate-answer-cell"), true);
+});
+
 test("標籤右側候選格已填時取第一格並警告；無右側格時退回標籤格", () => {
   const filled = parseGuidedNotes(
     sheet(

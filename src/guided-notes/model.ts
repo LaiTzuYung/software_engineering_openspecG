@@ -44,7 +44,7 @@ export interface ParsedQuestion {
 }
 
 export interface ParseWarning {
-  readonly code: "answer-cell-already-filled";
+  readonly code: "answer-cell-already-filled" | "duplicate-answer-cell";
   readonly message: string;
   readonly cell: LocatedCell;
 }

@@ -141,6 +141,7 @@ function answerCellForRow(
   row: number,
   header: HeaderLocation,
   warnings: ParseWarning[],
+  defaultSubquestionNumber: number,
 ): { answerCell: LocatedCell; labelCell?: LocatedCell; number: number } {
   const firstColumn = header.answerStartColumn;
   const labelValue = getCellValue(sheet, row, firstColumn);
@@ -187,7 +188,7 @@ function answerCellForRow(
   const answerCoordinate = answerRange ? topLeftOfRange(answerRange) : { row, column: firstColumn };
   return {
     answerCell: location(sheet, answerCoordinate.row, answerCoordinate.column),
-    number: 1,
+    number: defaultSubquestionNumber,
   };
 }
 
@@ -208,8 +209,14 @@ function duplicateNumberErrors(questions: readonly ParsedQuestion[]): Map<number
 function attachSubquestion(
   question: ParsedQuestion,
   subquestion: ParsedSubquestion,
+  warnings: ParseWarning[],
 ): ParsedQuestion {
   if (question.subquestions.some(({ answerCell }) => sameCoordinate(answerCell, subquestion.answerCell))) {
+    warnings.push({
+      code: "duplicate-answer-cell",
+      message: `同一題的多個小題定位到相同作答格，保留首次解析（${subquestion.answerCell.sheetName}!${toA1(subquestion.answerCell)}）。`,
+      cell: subquestion.answerCell,
+    });
     return question;
   }
   const subquestions = [...question.subquestions, subquestion];
@@ -260,12 +267,18 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
 
     const shouldCreateSubquestion = meaningful || (hasContent(questionValue) && !isContinuationOfMergedQuestion);
     if (shouldCreateSubquestion && currentQuestion !== undefined) {
-      const resolved = answerCellForRow(sheet, row, header, warnings);
+      const resolved = answerCellForRow(
+        sheet,
+        row,
+        header,
+        warnings,
+        currentQuestion.subquestions.length + 1,
+      );
       currentQuestion = attachSubquestion(currentQuestion, {
         number: resolved.number,
         answerCell: resolved.answerCell,
         ...(resolved.labelCell === undefined ? {} : { labelCell: resolved.labelCell }),
-      });
+      }, warnings);
       questions[questions.length - 1] = currentQuestion;
     }
   }

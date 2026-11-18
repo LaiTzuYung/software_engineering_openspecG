@@ -22,6 +22,16 @@ export function toA1(coordinate: CellCoordinate): string {
   return `${columnNumberToLetters(coordinate.column)}${coordinate.row}`;
 }
 
+export function fromA1(address: string): CellCoordinate {
+  const match = /^([A-Z]+)([1-9]\d*)$/iu.exec(address);
+  if (!match) throw new RangeError(`無效的 A1 儲存格座標：${address}`);
+  let column = 0;
+  for (const character of match[1]!.toUpperCase()) {
+    column = column * 26 + character.charCodeAt(0) - 64;
+  }
+  return { row: Number(match[2]), column };
+}
+
 export function rangeAt(
   ranges: readonly CellRange[],
   row: number,
