@@ -3,9 +3,11 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createPreviewFromInput } from "../src/cli.ts";
 import { parseGuidedNotes } from "../src/guided-notes/parser.ts";
 import { GuidedNotesImportService } from "../src/guided-notes/import-service.ts";
-import type { GridSheet } from "../src/guided-notes/model.ts";
+import type { GridSheet, ParseResult } from "../src/guided-notes/model.ts";
+import { GoogleSheetsImportError } from "../src/guided-notes/google-sheets-adapter.ts";
 
 const grid: GridSheet = {
   name: "離線測試表",
@@ -64,4 +66,61 @@ test("無效或已確認的預覽 ID 不會再建立額外題目集", async () =
     await service.confirm(preview.id);
     assert.deepEqual(await readdir(directory), [`${preview.id}.json`]);
   });
+});
+
+test("CLI 共用匯入路徑遇四種錯誤時不建立預覽或 JSON", async () => {
+  const noHeader: GridSheet = { name: "錯誤表", rows: [["其他"], [1]], mergedRanges: [] };
+  const duplicateNumber: GridSheet = {
+    name: "錯誤表",
+    rows: [["題號", "作答"], [3, null], [3, null]],
+    mergedRanges: [],
+  };
+  const cases: readonly {
+    name: string;
+    input: string;
+    readSpreadsheet?: (url: string) => Promise<GridSheet>;
+  }[] = [
+    { name: "無效網址", input: "https://example.test/not-a-sheet" },
+    {
+      name: "無權限",
+      input: "https://docs.google.com/spreadsheets/d/mock-id/edit",
+      readSpreadsheet: async () => {
+        throw new GoogleSheetsImportError("permission-denied", "mock permission denied");
+      },
+    },
+    {
+      name: "找不到表頭",
+      input: "https://docs.google.com/spreadsheets/d/mock-id/edit",
+      readSpreadsheet: async () => noHeader,
+    },
+    {
+      name: "題號重複",
+      input: "https://docs.google.com/spreadsheets/d/mock-id/edit",
+      readSpreadsheet: async () => duplicateNumber,
+    },
+  ];
+
+  for (const scenario of cases) {
+    await withTemporaryDirectory(async (directory) => {
+      class ObservedService extends GuidedNotesImportService {
+        previewCalls = 0;
+
+        override preview(result: ParseResult) {
+          this.previewCalls += 1;
+          return super.preview(result);
+        }
+      }
+      const service = new ObservedService(directory);
+      await assert.rejects(
+        createPreviewFromInput(scenario.input, {
+          service,
+          ...(scenario.readSpreadsheet === undefined ? {} : { readSpreadsheet: scenario.readSpreadsheet }),
+        }),
+        (error: unknown) => error instanceof Error,
+        scenario.name,
+      );
+      assert.equal(service.previewCalls, 0, `${scenario.name}: 不應建立預覽`);
+      assert.deepEqual(await readdir(directory), [], `${scenario.name}: 不應寫入 JSON`);
+    });
+  }
 });
