@@ -164,3 +164,6 @@ service-account*.json
 
 # 匯入的題目集暫存資料
 data/
+
+# Guided Notes imported question sets
+data/guided-notes/

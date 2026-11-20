@@ -30,6 +30,8 @@
 - Google Sheets API 轉接器是老師線上匯入主流程，讀取試算表中工作表格值與合併範圍，不先下載或轉換成 `.xlsx`。
 - `.xlsx` 轉接器只用於離線 fixture 自動測試與需求指定的備援；它產生同一格狀資料模型，重用同一解析器。
 
+Google API 用 Google 官方 `googleapis` 套件，固定版本 189.0.0（npm 當前 latest，符合本專案 Node.js 22 環境）。讀值請求指定 `UNFORMATTED_VALUE`，讓 API 回傳未格式化的數值；數值題號 1 與 XLSX 中以 `1.0` 儲存的數值經同一解析器正規化為整數 1。
+
 替代方案是分別為 Google 與 XLSX 寫解析器；不採用，因為兩套解析可能在合併儲存格或題組處理上分歧，fixtures 也無法直接驗證線上主流程所用解析規則。
 
 ### 試算表網址與工作表選擇
@@ -65,6 +67,8 @@
 Google 服務帳號憑證檔案存於 repo 外，程式由環境變數取得路徑或必要設定；repo 不含金鑰。權限錯誤訊息從執行設定取得服務帳號 email，避免 email 寫死在程式或文件內。`.env.example`（若採用）只能列變數名稱與非機密範例值。
 
 替代方案是把服務帳號金鑰放在 repo 的設定檔；不採用，避免憑證外洩。
+
+執行環境只透過 `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` 指定 repo 外服務帳號 JSON 檔路徑；`.env.example` 只能列出此變數與假路徑。應由 Google Auth library 載入憑證，應用程式只讀取其 `client_email` 欄位用於權限錯誤，不讀取、輸出或記錄 private key。
 
 ### Q8 擴充點
 

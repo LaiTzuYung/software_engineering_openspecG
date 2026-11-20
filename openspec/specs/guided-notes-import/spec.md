@@ -1,10 +1,10 @@
-# Spec Delta
+# guided-notes-import Specification
 
 ## Purpose
 
 讓老師能從不同版面的 Guided Notes Google 試算表可靠地偵測題目，先檢視解析預覽，再確認建立題目集。
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: 匯入 Google 試算表並選擇工作表
 系統 SHALL 接受 Google 試算表網址，解析試算表 ID 與選用的 `gid`，並透過 Google Sheets API 讀取線上資料。網址含 `gid` 時 SHALL 讀取指定工作表；未含 `gid` 時 SHALL 預設讀取第一張工作表。系統 SHALL 將無效網址回報為明確錯誤。
@@ -67,6 +67,10 @@
 - **WHEN** 系統解析題號值為數值 `1.0` 或文字 `1`、`1.`、`１`、`Q1`、`第1題`
 - **THEN** 系統均將題號正規化為整數 1
 
+#### Scenario: Google 數值題號與 XLSX 數值題號結果一致
+- **WHEN** mock Google Sheets API 以 `UNFORMATTED_VALUE` 回傳數值題號 1，且 XLSX 來源包含數值 1.0
+- **THEN** 兩個來源經同一解析器處理後均得到整數題號 1
+
 #### Scenario: 一般題號重複
 - **WHEN** 題號 2 出現在兩個或以上不同題號格
 - **THEN** 整份匯入失敗，並列出所有題號 2 的重複座標
@@ -127,3 +131,5 @@
 #### Scenario: 建立簡答題
 - **WHEN** 老師確認含有單題與題組的預覽
 - **THEN** 系統建立的每個題目均為簡答題並保留題號及小題作答格對應
+
+
