@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { GridSheet } from "../guided-notes/model.ts";
 import { GuidedNotesImportService } from "../guided-notes/import-service.ts";
@@ -69,6 +69,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
   const dataDirectory = options.dataDirectory;
   const repository = new QuestionSetRepository(dataDirectory);
   const importService = options.importService ?? new GuidedNotesImportService(dataDirectory);
+  const studentSessions = new Map<string, { readonly activityCode: string; readonly groupId: string }>();
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const route = url.pathname;
@@ -164,13 +165,50 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
         sendJson(response, 400, { error: error instanceof Error ? error.message : "request-failed" }); return;
       }
     }
+    if (method === "GET" && route === "/api/student/activity") {
+      const code = url.searchParams.get("code") ?? "";
+      if (!/^\d{4}$/u.test(code)) { sendJson(response, 400, { error: "invalid-activity-code" }); return; }
+      const activity = manager.getActive();
+      if (activity === undefined || code !== activity.activityCode) {
+        sendJson(response, 404, { error: "activity-not-found" }); return;
+      }
+      sendJson(response, 200, {
+        found: true,
+        groups: activity.groups.map((group) => ({ id: group.id, name: group.name })),
+      });
+      return;
+    }
+    if (method === "POST" && route === "/api/student/join") {
+      try {
+        const body = await readJson(request);
+        const activity = manager.getActive();
+        if (activity === undefined || body.activityCode !== activity.activityCode) {
+          sendJson(response, 404, { error: "activity-not-found" }); return;
+        }
+        const group = activity.groups.find(({ id }) => id === body.groupId);
+        if (group === undefined) { sendJson(response, 400, { error: "group-not-found" }); return; }
+        const sessionToken = randomUUID();
+        studentSessions.set(sessionToken, { activityCode: activity.activityCode, groupId: group.id });
+        sendJson(response, 201, {
+          sessionToken,
+          activityCode: activity.activityCode,
+          groupId: group.id,
+          groupName: group.name,
+        });
+      } catch (error) {
+        sendJson(response, 400, { error: error instanceof Error ? error.message : "invalid-request" });
+      }
+      return;
+    }
     if (method === "GET" && route === "/api/student/state") {
       const activity = manager.getActive();
       if (activity === undefined || url.searchParams.get("code") !== activity.activityCode) {
         sendJson(response, 404, { error: "activity-not-found" }); return;
       }
       const token = request.headers["x-student-session"];
-      const identity = typeof token === "string" ? options.resolveStudentSession?.(token) : undefined;
+      const identity = typeof token === "string"
+        ? studentSessions.get(token) ?? options.resolveStudentSession?.(token)
+        : undefined;
       if (identity === undefined || identity.activityCode !== activity.activityCode) {
         sendJson(response, 401, { error: "invalid-student-session" }); return;
       }
@@ -181,7 +219,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
   });
   const socketServer = createLiveBuzzerSocketServer(server, manager, {
     teacherPin,
-    resolveStudentSession: options.resolveStudentSession ?? (() => undefined),
+    resolveStudentSession: (token) => studentSessions.get(token) ?? options.resolveStudentSession?.(token),
   });
   return {
     server,

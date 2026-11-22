@@ -146,6 +146,85 @@ test("真實 HTTP 學生路由在結束前回應不含他組答案與順位", as
   });
 });
 
+test("活動代碼查詢成功時只回傳所有組別 id／名稱，不含作答資料或順位", async () => {
+  await withServer(async (base, _directory, app) => {
+    const activity = app.manager.create(fixtureSet(), { activityCode: "2468" });
+    activity.stage = "buzzing";
+    activity.nextSubmissionSequence = 987654;
+    assert.equal(submitAnswers(activity, "group-2", 1, { 1: "SECRET-ANSWER-B" }).accepted, true);
+
+    const response = await fetch(`${base}/api/student/activity?code=2468`);
+    assert.equal(response.status, 200);
+    const payload = await response.text();
+    assert.deepEqual(JSON.parse(payload), {
+      found: true,
+      groups: [
+        { id: "group-1", name: "第 1 組" },
+        { id: "group-2", name: "第 2 組" },
+        { id: "group-3", name: "第 3 組" },
+        { id: "group-4", name: "第 4 組" },
+      ],
+    });
+    assert.equal(payload.includes("SECRET-ANSWER-B"), false);
+    assert.equal(payload.includes("987654"), false);
+    assert.equal(payload.includes('"sequence"'), false);
+  });
+});
+
+test("活動代碼查詢回傳建立活動時設定的自訂組名", async () => {
+  await withServer(async (base, _directory, app) => {
+    app.manager.create(fixtureSet(), { activityCode: "8642", groupNames: ["紅隊", "藍隊"] });
+    const response = await fetch(`${base}/api/student/activity?code=8642`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      found: true,
+      groups: [{ id: "group-1", name: "紅隊" }, { id: "group-2", name: "藍隊" }],
+    });
+  });
+});
+
+test("無效活動代碼查詢回傳明確錯誤", async () => {
+  await withServer(async (base, _directory, app) => {
+    app.manager.create(fixtureSet(), { activityCode: "2468" });
+    const response = await fetch(`${base}/api/student/activity?code=1357`);
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "activity-not-found" });
+  });
+});
+
+test("學生頁加入時將代碼與所選組別送至伺服器並把回傳身分存於分頁 sessionStorage", async () => {
+  await withServer(async (base, _directory, app) => {
+    app.manager.create(fixtureSet(), { activityCode: "2468", groupNames: ["紅隊", "藍隊"] });
+    const page = await (await fetch(`${base}/student`)).text();
+    assert.match(page, /\/api\/student\/activity\?code=/u);
+    assert.match(page, /\/api\/student\/join/u);
+    assert.match(page, /maxlength="4"/u);
+    assert.match(page, /找不到此活動代碼/u);
+    assert.match(page, /joinButton\.disabled=groupSelect\.value===''?/u);
+    assert.match(page, /sessionStorage\.setItem\('liveBuzzerSession'/u);
+    assert.match(page, /sessionStorage\.removeItem\('liveBuzzerSession'/u);
+
+    const joined = await fetch(`${base}/api/student/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ activityCode: "2468", groupId: "group-2" }),
+    });
+    assert.equal(joined.status, 201);
+    const identity = await joined.json() as { sessionToken: string; activityCode: string; groupId: string; groupName: string };
+    assert.match(identity.sessionToken, /^[0-9a-f-]{36}$/u);
+    assert.deepEqual({ activityCode: identity.activityCode, groupId: identity.groupId, groupName: identity.groupName }, {
+      activityCode: "2468", groupId: "group-2", groupName: "藍隊",
+    });
+    const invalidJoin = await fetch(`${base}/api/student/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ activityCode: "2468", groupId: "not-a-group" }),
+    });
+    assert.equal(invalidJoin.status, 400);
+    assert.deepEqual(await invalidJoin.json(), { error: "group-not-found" });
+  });
+});
+
 test("老師匯入 HTTP 預覽未確認不落檔，確認後沿用既有 import-service 寫入 JSON", async () => {
   await withServer(async (base, directory) => {
     const previewResponse = await fetch(`${base}/api/teacher/import/preview`, {
