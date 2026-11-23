@@ -68,11 +68,17 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     const authorizedPage = await fetch(`${base}/teacher`, { headers: { cookie } });
     assert.equal(authorizedPage.status, 200);
     const teacherHtml = await authorizedPage.text();
+    for (const match of teacherHtml.matchAll(/<script>([\s\S]*?)<\/script>/gu)) {
+      assert.doesNotThrow(() => new Function(match[1]));
+    }
     assert.match(teacherHtml, /建立活動/u);
     assert.match(teacherHtml, /開始搶答/u);
     assert.match(teacherHtml, /結束活動/u);
     assert.match(teacherHtml, /題目敘述/u);
     assert.match(teacherHtml, /\/api\/teacher\/import\/preview/u);
+    assert.match(teacherHtml, /請輸入網址/u);
+    assert.match(teacherHtml, /renderTable/u);
+    assert.doesNotMatch(teacherHtml, /view\.textContent=JSON\.stringify/u);
 
     const studentHtml = await (await fetch(`${base}/student`)).text();
     assert.doesNotMatch(studentHtml, /開始搶答|結束活動|組別設定|\/api\/teacher|teacher:get-full-view|teacher:start/u);
@@ -196,6 +202,9 @@ test("學生頁加入時將代碼與所選組別送至伺服器並把回傳身�
   await withServer(async (base, _directory, app) => {
     app.manager.create(fixtureSet(), { activityCode: "2468", groupNames: ["紅隊", "藍隊"] });
     const page = await (await fetch(`${base}/student`)).text();
+    for (const match of page.matchAll(/<script>([\s\S]*?)<\/script>/gu)) {
+      assert.doesNotThrow(() => new Function(match[1]));
+    }
     assert.match(page, /\/api\/student\/activity\?code=/u);
     assert.match(page, /\/api\/student\/join/u);
     assert.match(page, /maxlength="4"/u);
@@ -203,6 +212,16 @@ test("學生頁加入時將代碼與所選組別送至伺服器並把回傳身�
     assert.match(page, /joinButton\.disabled=groupSelect\.value===''?/u);
     assert.match(page, /sessionStorage\.setItem\('liveBuzzerSession'/u);
     assert.match(page, /sessionStorage\.removeItem\('liveBuzzerSession'/u);
+    assert.match(page, /activity:student-view/u);
+    assert.match(page, /等待老師開始/u);
+    assert.match(page, /本組已送出/u);
+    assert.match(page, /成功組別/u);
+    assert.match(page, /answerInputs\.some\(input=>input\.value\.trim\(\)===''/u);
+    assert.match(page, /submit\.disabled=answerInputs/u);
+    assert.match(page, /答案不可空白/u);
+    assert.match(page, /超過 200 字/u);
+    assert.match(page, /不能重複提交/u);
+    assert.match(page, /目前階段不能作答/u);
 
     const joined = await fetch(`${base}/api/student/join`, {
       method: "POST",

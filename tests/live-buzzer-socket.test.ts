@@ -141,7 +141,10 @@ test("initial, update, query and reconnect Socket payloads never include another
   const studentSocket = client(harness.url, { role: "student", sessionToken: "team-a-token" });
   context.after(() => studentSocket.disconnect());
 
-  const initialView = await connectAndReadStudentView(studentSocket);
+  const initialView = await connectAndReadStudentView(studentSocket) as {
+    questions: { description?: string }[];
+  };
+  assert.equal(initialView.questions[0]?.description, undefined);
   assertDoesNotContainSecretOrRank(initialView);
 
   const stateResponse = await studentSocket.emitWithAck("student:get-state");
@@ -154,7 +157,12 @@ test("initial, update, query and reconnect Socket payloads never include another
   const nextStudentView = nextEvent(studentSocket, "activity:student-view");
   const settingResponse = await teacherSocket.emitWithAck("teacher:set-question-descriptions", true);
   assert.deepEqual(settingResponse, { ok: true, visible: true });
-  const updateView = await nextStudentView;
+  const updateView = await nextStudentView as {
+    questionDescriptionsVisible: boolean;
+    questions: { description?: string }[];
+  };
+  assert.equal(updateView.questionDescriptionsVisible, true);
+  assert.equal(updateView.questions[0]?.description, "題目敘述");
   assertDoesNotContainSecretOrRank(updateView);
 
   studentSocket.disconnect();
@@ -246,6 +254,71 @@ test("student and unauthenticated Socket clients cannot run teacher actions or r
   }
   assert.equal(activity.stage, "preparing");
   assert.equal(activity.showQuestionDescriptions, false);
+});
+
+test("student Socket refresh restores stage and submitted state; same-group clients sync and rejection reasons are explicit", async (context) => {
+  const manager = new ActivityManager();
+  const activity = manager.create(questionSet(), { activityCode: "2468" });
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+
+  const firstTab = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  const secondTab = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  const teacher = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+  context.after(() => firstTab.disconnect());
+  context.after(() => secondTab.disconnect());
+  context.after(() => teacher.disconnect());
+  const [firstInitial, secondInitial] = await Promise.all([
+    connectAndReadStudentView(firstTab),
+    connectAndReadStudentView(secondTab),
+    connectAndReadTeacherView(teacher),
+  ]).then((views) => [views[0], views[1]] as const);
+  assert.equal((firstInitial as { stage: string }).stage, "preparing");
+  assert.equal((secondInitial as { group: { id: string } }).group.id, "group-1");
+  assert.deepEqual(await firstTab.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "before start", 2: "no" },
+  }), { ok: false, reason: "activity-not-buzzing" });
+
+  const firstStageUpdate = nextEvent<{ stage: string }>(firstTab, "activity:student-view");
+  const secondStageUpdate = nextEvent<{ stage: string }>(secondTab, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:start"), { ok: true, stage: "buzzing" });
+  assert.equal((await firstStageUpdate).stage, "buzzing");
+  assert.equal((await secondStageUpdate).stage, "buzzing");
+
+  assert.deepEqual(await firstTab.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "  ", 2: "answer" },
+  }), { ok: false, reason: "blank-answer" });
+  assert.deepEqual(await firstTab.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "x".repeat(201), 2: "answer" },
+  }), { ok: false, reason: "answer-too-long" });
+
+  const syncedView = nextEvent<{ stage: string; questions: { subquestions: { submitted: boolean }[] }[] }>(secondTab, "activity:student-view");
+  assert.deepEqual(await firstTab.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "team answer", 2: "second answer" },
+  }), { ok: true, questionNumber: 7 });
+  const update = await syncedView;
+  assert.equal(update.questions[0]?.subquestions.every(({ submitted }) => submitted), true);
+  assert.equal(JSON.stringify(update).includes("team answer"), false);
+  assert.deepEqual(await secondTab.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "different", 2: "answer" },
+  }), { ok: false, reason: "already-submitted" });
+
+  const refreshedTab = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  context.after(() => refreshedTab.disconnect());
+  const refreshedView = await connectAndReadStudentView(refreshedTab) as {
+    stage: string; group: { id: string }; questions: { subquestions: { submitted: boolean }[] }[];
+  };
+  assert.equal(refreshedView.stage, "buzzing");
+  assert.equal(refreshedView.group.id, "group-1");
+  assert.equal(refreshedView.questions[0]?.subquestions.every(({ submitted }) => submitted), true);
+
+  const endedViewPromise = nextEvent<{ stage: string; results: unknown }>(refreshedTab, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:end"), { ok: true, stage: "ended" });
+  const endedView = await endedViewPromise;
+  assert.equal(endedView.stage, "ended");
+  assert.deepEqual(await refreshedTab.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "late", 2: "late" },
+  }), { ok: false, reason: "activity-not-buzzing" });
 });
 
 function isOkResponse(value: unknown): boolean {

@@ -84,6 +84,7 @@ test("teacher view includes all groups, answers and server sequence", () => {
   const payload = JSON.stringify(teacherView);
   assert.equal(teacherView.questions[0]?.groups[1]?.submitted, true);
   assert.equal(teacherView.questions[0]?.groups[1]?.sequence, 987654);
+  assert.deepEqual(teacherView.questions[0]?.subquestions, [{ number: 1 }, { number: 2 }]);
   assert.equal(payload.includes("SECRET-ANSWER-B"), true);
   assert.equal(payload.includes("987654"), true);
 });

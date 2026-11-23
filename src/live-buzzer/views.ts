@@ -45,6 +45,7 @@ export interface TeacherView {
   readonly questions: readonly {
     readonly number: number;
     readonly description: string;
+    readonly subquestions: readonly { readonly number: number }[];
     readonly groups: readonly {
       readonly groupId: string;
       readonly groupName: string;
@@ -105,6 +106,7 @@ export function createTeacherView(activity: ActivityState): TeacherView {
   const questions = activity.questionSet.questions.map((question) => ({
     number: question.number,
     description: question.description,
+    subquestions: question.subquestions.map(({ number }) => ({ number })),
     groups: activity.groups.map((group) => {
       const submission = activity.submissions.get(question.number)?.get(group.id);
       let answers: readonly StudentAnswerView[] | null = null;
