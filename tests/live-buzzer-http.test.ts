@@ -131,6 +131,39 @@ test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘�
   });
 });
 
+test("HTTP server 重啟後活動與提交歸零，匯入題目集仍可讀取", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-restart-"));
+  const questionDirectory = path.join(directory, "guided-notes");
+  await mkdir(questionDirectory, { recursive: true });
+  await writeFile(path.join(questionDirectory, "seed-set.json"), JSON.stringify(fixtureSet()));
+  let first: ReturnType<typeof createLiveBuzzerServer> | undefined = createLiveBuzzerServer({ teacherPin: PIN, dataDirectory: questionDirectory });
+  let second: ReturnType<typeof createLiveBuzzerServer> | undefined;
+  try {
+    const firstBase = await first.listen(0);
+    const activity = first.manager.create(fixtureSet(), { activityCode: "2468" });
+    activity.stage = "buzzing";
+    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "will be cleared" }).accepted, true);
+    assert.equal(activity.submissions.get(1)?.size, 1);
+    await first.close();
+
+    second = createLiveBuzzerServer({ teacherPin: PIN, dataDirectory: questionDirectory });
+    const secondBase = await second.listen(0);
+    assert.equal(second.manager.getActive(), undefined);
+    const activityLookup = await fetch(`${secondBase}/api/student/activity?code=2468`);
+    assert.equal(activityLookup.status, 404);
+    assert.deepEqual(await activityLookup.json(), { error: "activity-not-found" });
+    const questionSets = await fetch(`${secondBase}/api/teacher/question-sets`, { headers: teacherHeaders() });
+    assert.deepEqual(await questionSets.json(), {
+      items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1 }],
+    });
+    first = undefined;
+  } finally {
+    if (second !== undefined) await second.close();
+    if (first !== undefined) await first.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("真實 HTTP 學生路由在結束前回應不含他組答案與順位", async () => {
   await withServer(async (base, _directory, app) => {
     const activity = app.manager.create(fixtureSet(), { activityCode: "2468" });
@@ -222,6 +255,13 @@ test("學生頁加入時將代碼與所選組別送至伺服器並把回傳身�
     assert.match(page, /超過 200 字/u);
     assert.match(page, /不能重複提交/u);
     assert.match(page, /目前階段不能作答/u);
+    assert.match(page, /id="leave-button"[^>]*>離開活動/u);
+    assert.match(page, /leaveButton\.addEventListener\('click',leaveActivity\)/u);
+    assert.match(page, /function leaveActivity\(\)\{clearSavedIdentity\(\)/u);
+    assert.match(page, /function clearSavedIdentity\(\)\{sessionStorage\.removeItem\('liveBuzzerSession'\);sessionStorage\.removeItem\('liveBuzzerActivityCode'\);sessionStorage\.removeItem\('liveBuzzerGroupId'\)\}/u);
+    assert.match(page, /oldSocket\.disconnect\(\)/u);
+    assert.match(page, /currentView=null;content\.replaceChildren\(\);joinForm\.hidden=false;leaveButton\.hidden=true;codeInput\.value=''/u);
+    assert.doesNotMatch(page, /\/api\/student\/leave/u);
 
     const joined = await fetch(`${base}/api/student/join`, {
       method: "POST",
@@ -241,6 +281,13 @@ test("學生頁加入時將代碼與所選組別送至伺服器並把回傳身�
     });
     assert.equal(invalidJoin.status, 400);
     assert.deepEqual(await invalidJoin.json(), { error: "group-not-found" });
+    const invalidActivityJoin = await fetch(`${base}/api/student/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ activityCode: "1357", groupId: "group-1" }),
+    });
+    assert.equal(invalidActivityJoin.status, 404);
+    assert.deepEqual(await invalidActivityJoin.json(), { error: "activity-not-found" });
   });
 });
 

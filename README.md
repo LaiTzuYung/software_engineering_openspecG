@@ -29,6 +29,53 @@ npm test
 npm run test:unit
 ```
 
+## 活動與搶答
+
+### 啟動伺服器
+
+Node.js 22 安裝相依套件後，在專案根目錄以單一指令啟動：
+
+```powershell
+npm install
+npm start
+```
+
+啟動時終端會列出老師登入頁、學生頁與老師 PIN。未設定 `TEACHER_PIN` 時，伺服器每次啟動會隨機產生 PIN 並印出；也可在 PowerShell 指定固定 PIN：
+
+```powershell
+$env:TEACHER_PIN = 'your-local-teacher-pin'
+npm start
+```
+
+網址預設使用 `http://127.0.0.1:3000`。只把老師 PIN 輸入老師登入頁；學生只使用學生頁與活動代碼。
+
+### 老師與學生操作流程
+
+1. 老師開啟終端列出的老師登入頁，輸入 PIN。
+2. 如尚未有題目集，老師在「匯入題目集」輸入既有來源網址，先預覽再確認；Google Sheets 匯入須設定 `GOOGLE_SERVICE_ACCOUNT_KEY_FILE`。確認後的題目集 JSON 保存在 `data/guided-notes/`。
+3. 老師選取題目集，可選擇組名（每行一組；留白時使用預設四組），再建立活動並把活動代碼提供給學生。
+4. 學生輸入活動代碼、選擇組別並加入。老師開始後學生可作答；題組須填完所有小題再一次送出。老師可切換題目敘述顯示，並即時查看各題、各組的提交、順位與答案。
+5. 老師結束活動後，學生頁顯示各題成功組與答案。
+
+活動、分組、提交與學生分頁身分只存在伺服器記憶體；重新啟動伺服器會清空活動及提交。已確認匯入的題目集 JSON 會保留。
+
+### 驗證
+
+在專案根目錄執行完整型別檢查與測試：
+
+```powershell
+npm test
+```
+
+也可分開執行：
+
+```powershell
+npm run typecheck
+npm run test:unit
+```
+
+Socket.IO 與 HTTP 整合測試會啟動 localhost 測試伺服器；請在允許本機 loopback 的一般 PowerShell 環境執行 `npm test`。測試匯入使用 mock 來源，匯入與活動測試資料使用暫存目錄，不連線 Google，也不在 repo 留下測試用 `data/`。
+
 手動執行一次匯入並查看預覽：
 
 ```sh

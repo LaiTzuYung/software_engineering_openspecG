@@ -281,9 +281,11 @@ test("student Socket refresh restores stage and submitted state; same-group clie
 
   const firstStageUpdate = nextEvent<{ stage: string }>(firstTab, "activity:student-view");
   const secondStageUpdate = nextEvent<{ stage: string }>(secondTab, "activity:student-view");
+  const stageChangeStartedAt = Date.now();
   assert.deepEqual(await teacher.emitWithAck("teacher:start"), { ok: true, stage: "buzzing" });
   assert.equal((await firstStageUpdate).stage, "buzzing");
   assert.equal((await secondStageUpdate).stage, "buzzing");
+  assert.ok(Date.now() - stageChangeStartedAt < 1_000, "所有已連線學生須在 1 秒內收到階段更新");
 
   assert.deepEqual(await firstTab.emitWithAck("student:submit", {
     questionNumber: 7, answers: { 1: "  ", 2: "answer" },
@@ -319,6 +321,37 @@ test("student Socket refresh restores stage and submitted state; same-group clie
   assert.deepEqual(await refreshedTab.emitWithAck("student:submit", {
     questionNumber: 7, answers: { 1: "late", 2: "late" },
   }), { ok: false, reason: "activity-not-buzzing" });
+});
+
+test("leaving one student Socket tab does not clear the group's accepted answer or affect another tab", async (context) => {
+  const manager = new ActivityManager();
+  const activity = manager.create(questionSet(), { activityCode: "2468" });
+  transitionActivityStage(activity, "buzzing");
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+
+  const leavingTab = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  const stayingTab = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  context.after(() => leavingTab.disconnect());
+  context.after(() => stayingTab.disconnect());
+  await Promise.all([connectAndReadStudentView(leavingTab), connectAndReadStudentView(stayingTab)]);
+
+  assert.deepEqual(await leavingTab.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "persist after leave", 2: "also retained" },
+  }), { ok: true, questionNumber: 7 });
+  const accepted = activity.submissions.get(7)?.get("group-1");
+  assert.ok(accepted);
+  leavingTab.disconnect();
+
+  const state = await stayingTab.emitWithAck("student:get-state") as {
+    ok: boolean; view: { questions: { subquestions: { submitted: boolean }[] }[] };
+  };
+  assert.equal(state.ok, true);
+  assert.equal(state.view.questions[0]?.subquestions.every(({ submitted }) => submitted), true);
+  assert.equal(activity.submissions.get(7)?.get("group-1")?.sequence, accepted.sequence);
+  assert.deepEqual(activity.submissions.get(7)?.get("group-1")?.answers, {
+    1: "persist after leave", 2: "also retained",
+  });
 });
 
 function isOkResponse(value: unknown): boolean {
