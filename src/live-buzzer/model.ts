@@ -12,6 +12,7 @@ export interface AcceptedSubmission {
   readonly groupId: string;
   readonly questionNumber: number;
   readonly sequence: number;
+  readonly submittedAt: string;
   readonly answers: Readonly<Record<number, string>>;
 }
 

@@ -128,6 +128,26 @@ test("未帶 gid 時選 metadata 中 index 最小的工作表，並以 UNFORMATT
   });
 });
 
+test("readWithSource 回傳 spreadsheet ID 與實際選取工作表 gid", async () => {
+  const reader = new GoogleSheetsReader(
+    makeApi({
+      sheets: [
+        { properties: { sheetId: 12, title: "第二張", index: 1 } },
+        { properties: { sheetId: 2, title: "第一張", index: 0 } },
+      ],
+    }),
+    serviceEmail,
+  );
+
+  const defaultSheet = await reader.readWithSource(spreadsheetUrl);
+  assert.equal(defaultSheet.sheet.name, "第一張");
+  assert.deepEqual(defaultSheet.source, { spreadsheetId: "spreadsheet_123", gid: 2 });
+
+  const selectedSheet = await reader.readWithSource(`${spreadsheetUrl}?gid=12`);
+  assert.equal(selectedSheet.sheet.name, "第二張");
+  assert.deepEqual(selectedSheet.source, { spreadsheetId: "spreadsheet_123", gid: 12 });
+});
+
 test("帶 gid 時讀取指定工作表，不存在時不呼叫 values API", async () => {
   let valueCalls = 0;
   const reader = new GoogleSheetsReader(

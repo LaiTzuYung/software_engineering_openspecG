@@ -5,10 +5,15 @@ import { parseGuidedNotes } from "./guided-notes/parser.ts";
 import { readXlsxFile } from "./guided-notes/xlsx-adapter.ts";
 import { createGoogleSheetsReader, parseSpreadsheetUrl } from "./guided-notes/google-sheets-adapter.ts";
 import { GuidedNotesImportService } from "./guided-notes/import-service.ts";
+import type { GoogleSpreadsheetSource } from "./guided-notes/import-service.ts";
 import type { GridSheet } from "./guided-notes/model.ts";
 
 export interface ImportPreviewDependencies {
   readonly readSpreadsheet?: (url: string) => Promise<GridSheet>;
+  readonly readSpreadsheetWithSource?: (url: string) => Promise<{
+    readonly sheet: GridSheet;
+    readonly source: GoogleSpreadsheetSource;
+  }>;
   readonly service?: GuidedNotesImportService;
 }
 
@@ -18,21 +23,33 @@ export async function createPreviewFromInput(
   dependencies: ImportPreviewDependencies = {},
 ) {
   let result;
+  let googleSource: GoogleSpreadsheetSource | undefined;
   if (/\.xlsx$/iu.test(input)) {
     const workbook = await readXlsxFile(input);
     const sheet = workbook.sheets[0];
     if (sheet === undefined) throw new Error("XLSX 檔案沒有工作表。");
     result = parseGuidedNotes(sheet);
   } else {
-    parseSpreadsheetUrl(input);
-    const grid = dependencies.readSpreadsheet === undefined
-      ? await (await createGoogleSheetsReader()).read(input)
-      : await dependencies.readSpreadsheet(input);
-    result = parseGuidedNotes(grid);
+    const parsedUrl = parseSpreadsheetUrl(input);
+    if (dependencies.readSpreadsheetWithSource !== undefined) {
+      const readResult = await dependencies.readSpreadsheetWithSource(input);
+      result = parseGuidedNotes(readResult.sheet);
+      googleSource = readResult.source;
+    } else if (dependencies.readSpreadsheet !== undefined) {
+      const grid = await dependencies.readSpreadsheet(input);
+      result = parseGuidedNotes(grid);
+      if (parsedUrl.gid !== undefined) {
+        googleSource = { spreadsheetId: parsedUrl.spreadsheetId, gid: parsedUrl.gid };
+      }
+    } else {
+      const readResult = await (await createGoogleSheetsReader()).readWithSource(input);
+      result = parseGuidedNotes(readResult.sheet);
+      googleSource = readResult.source;
+    }
   }
 
   const service = dependencies.service ?? new GuidedNotesImportService();
-  const preview = service.preview(result);
+  const preview = service.preview(result, googleSource);
   return { preview, service };
 }
 

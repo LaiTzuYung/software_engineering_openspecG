@@ -2,9 +2,9 @@
 
 ## 1. 資料補強
 
-- [ ] 1.1 在匯入預覽與題目集保存 Google spreadsheet ID、指定 gid，以及未指定 gid 時實際選定的 sheetId；確認 XLSX 來源欄位為空，並新增／更新匯入單元測試涵蓋兩種 Google 來源與 XLSX。
-- [ ] 1.2 在接受提交時產生伺服器 ISO 8601 timestamp，題組以單筆 submission 共用時間；新增測試確認不採用客戶端時間。
-- [ ] 1.3 確認舊題目集缺少來源欄位時仍可讀取且不顯示回寫入口；以 repository 測試驗證相容性。
+- [x] 1.1 在匯入預覽與題目集保存 Google spreadsheet ID、指定 gid，以及未指定 gid 時實際選定的 sheetId；確認 XLSX 來源欄位為空，並新增／更新匯入單元測試涵蓋兩種 Google 來源與 XLSX。
+- [x] 1.2 在接受提交時產生伺服器 ISO 8601 timestamp，題組以單筆 submission 共用時間；新增測試確認不採用客戶端時間。
+- [x] 1.3 確認舊題目集缺少來源欄位時仍可讀取且不顯示回寫入口；以 repository 測試驗證相容性。
 
 ## 2. 重新定位與比對
 

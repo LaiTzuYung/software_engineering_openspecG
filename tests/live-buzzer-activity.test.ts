@@ -83,6 +83,22 @@ test("question set repository reads valid JSON from a temporary directory", asyn
   }
 });
 
+test("question set repository reads legacy JSON without Google source metadata", async () => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-legacy-set-"));
+  try {
+    const legacySet = questionSet();
+    const legacyRecord = { ...legacySet } as Record<string, unknown>;
+    delete legacyRecord.googleSource;
+    await writeFile(path.join(temporaryDirectory, "legacy.json"), `${JSON.stringify(legacyRecord)}\n`, "utf8");
+
+    const loaded = await new QuestionSetRepository(temporaryDirectory).get("legacy");
+    assert.equal(loaded?.id, "set-1");
+    assert.equal(loaded?.googleSource, undefined);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("question set repository rejects malformed JSON shape", async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-sets-"));
   try {

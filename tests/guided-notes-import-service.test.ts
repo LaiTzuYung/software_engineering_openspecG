@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createPreviewFromInput } from "../src/cli.ts";
 import { parseGuidedNotes } from "../src/guided-notes/parser.ts";
@@ -54,6 +55,40 @@ test("未確認時只有記憶體預覽且沒有 JSON 檔；確認後記憶體�
     assert.deepEqual(service.getCreatedQuestionSet(preview.id), persisted);
     assert.deepEqual(persisted, preview);
     assert.deepEqual(await readdir(directory), [`${preview.id}.json`]);
+  });
+});
+
+test("Google 匯入預覽與確認後的題目集保留 spreadsheet ID 和 gid", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const service = new GuidedNotesImportService(directory);
+    const result = await createPreviewFromInput(
+      "https://docs.google.com/spreadsheets/d/mock-id/edit",
+      {
+        service,
+        readSpreadsheetWithSource: async () => ({
+          sheet: grid,
+          source: { spreadsheetId: "mock-id", gid: 37 },
+        }),
+      },
+    );
+
+    assert.deepEqual(result.preview.googleSource, { spreadsheetId: "mock-id", gid: 37 });
+    const created = await result.service.confirm(result.preview.id);
+    assert.deepEqual(created.googleSource, { spreadsheetId: "mock-id", gid: 37 });
+    assert.deepEqual((await result.service.readPersistedQuestionSet(result.preview.id)).googleSource, {
+      spreadsheetId: "mock-id",
+      gid: 37,
+    });
+  });
+});
+
+test("XLSX 匯入預覽不帶 Google 試算表來源", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const fixture = fileURLToPath(new URL("./fixtures/guided-notes/T2-group.xlsx", import.meta.url));
+    const service = new GuidedNotesImportService(directory);
+    const { preview } = await createPreviewFromInput(fixture, { service });
+    assert.equal(preview.googleSource, undefined);
+    assert.equal((await service.confirm(preview.id)).googleSource, undefined);
   });
 });
 

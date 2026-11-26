@@ -84,6 +84,7 @@ export function submitAnswers(
     groupId,
     questionNumber,
     sequence: activity.nextSubmissionSequence,
+    submittedAt: new Date().toISOString(),
     answers: normalizedAnswers,
   };
 

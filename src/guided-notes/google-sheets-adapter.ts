@@ -1,5 +1,6 @@
 import { google } from "googleapis";
 import type { CellRange, CellValue, GridSheet } from "./model.ts";
+import type { GoogleSpreadsheetSource } from "./import-service.ts";
 
 export const GOOGLE_SERVICE_ACCOUNT_KEY_FILE_ENV = "GOOGLE_SERVICE_ACCOUNT_KEY_FILE";
 const SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
@@ -82,6 +83,11 @@ export interface GoogleSheetsAuthOptions {
 export interface GoogleSheetsReaderFactories {
   readonly createAuth?: (options: GoogleSheetsAuthOptions) => GoogleAuthLike;
   readonly createApiClient?: (authClient: unknown) => GoogleSheetsApiClient;
+}
+
+export interface GoogleSheetsReadResult {
+  readonly sheet: GridSheet;
+  readonly source: GoogleSpreadsheetSource;
 }
 
 function invalidUrl(message = "網址無效：請輸入 Google 試算表網址。"): GoogleSheetsImportError {
@@ -208,6 +214,10 @@ export class GoogleSheetsReader {
   }
 
   async read(url: string): Promise<GridSheet> {
+    return (await this.readWithSource(url)).sheet;
+  }
+
+  async readWithSource(url: string): Promise<GoogleSheetsReadResult> {
     const { spreadsheetId, gid } = parseSpreadsheetUrl(url);
     let metadata: GoogleSpreadsheetMetadata;
     try {
@@ -245,7 +255,10 @@ export class GoogleSheetsReader {
     const merges = (selectedSheet.merges ?? [])
       .filter((range) => range.sheetId === undefined || range.sheetId === sheetId)
       .map(convertGoogleGridRange);
-    return valuesToGrid(title, rawValues, merges);
+    return {
+      sheet: valuesToGrid(title, rawValues, merges),
+      source: { spreadsheetId, gid: sheetId! },
+    };
   }
 }
 

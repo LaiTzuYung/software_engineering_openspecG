@@ -92,6 +92,25 @@ test("accepts a complete question-group answer as one submission", () => {
   assert.equal(activity.nextSubmissionSequence, 2);
 });
 
+test("records a server ISO timestamp on each accepted submission and shares it across group answers", () => {
+  const activity = buzzingActivity();
+  const before = Date.now();
+  const single = submitAnswers(activity, "group-1", 1, { 1: "single answer" });
+  const group = submitAnswers(activity, "group-2", 2, { 1: "part one", 2: "part two" });
+  const after = Date.now();
+
+  assert.equal(single.accepted, true);
+  assert.equal(group.accepted, true);
+  if (!single.accepted || !group.accepted) return;
+  for (const submission of [single.submission, group.submission]) {
+    assert.match(submission.submittedAt, /^\d{4}-\d{2}-\d{2}T.*Z$/u);
+    const timestamp = Date.parse(submission.submittedAt);
+    assert.ok(timestamp >= before && timestamp <= after);
+  }
+  assert.equal(Object.keys(group.submission.answers).length, 2);
+  assert.equal(typeof group.submission.submittedAt, "string");
+});
+
 test("orders near-simultaneous submissions by server sequence and accepts one answer per group and question", async () => {
   const activity = buzzingActivity();
   const [first, sameGroupRace, anotherGroup, anotherQuestion] = await Promise.all([

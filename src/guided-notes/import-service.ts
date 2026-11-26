@@ -30,11 +30,17 @@ export interface PreviewWarning {
   readonly cell: PreviewCell;
 }
 
+export interface GoogleSpreadsheetSource {
+  readonly spreadsheetId: string;
+  readonly gid: number;
+}
+
 /** Source-neutral preview and persisted question-set representation. */
 export interface GuidedNotesQuestionSet {
   readonly id: string;
   readonly createdAt: string;
   readonly sheetName: string;
+  readonly googleSource?: GoogleSpreadsheetSource;
   readonly totalQuestionCount: number;
   readonly singleQuestionCount: number;
   readonly groupQuestionCount: number;
@@ -64,12 +70,16 @@ function previewQuestion(question: ParsedQuestion): PreviewQuestion {
   };
 }
 
-export function createImportPreview(result: ParseResult): GuidedNotesQuestionSet {
+export function createImportPreview(
+  result: ParseResult,
+  googleSource?: GoogleSpreadsheetSource,
+): GuidedNotesQuestionSet {
   const questions = result.questions.map(previewQuestion);
   return {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
     sheetName: result.sheetName,
+    ...(googleSource === undefined ? {} : { googleSource }),
     totalQuestionCount: questions.length,
     singleQuestionCount: questions.filter(({ type }) => type === "single").length,
     groupQuestionCount: questions.filter(({ type }) => type === "group").length,
@@ -92,8 +102,8 @@ export class GuidedNotesImportService {
     this.dataDirectory = dataDirectory;
   }
 
-  preview(result: ParseResult): GuidedNotesQuestionSet {
-    const preview = createImportPreview(result);
+  preview(result: ParseResult, googleSource?: GoogleSpreadsheetSource): GuidedNotesQuestionSet {
+    const preview = createImportPreview(result, googleSource);
     this.pending.set(preview.id, preview);
     return preview;
   }
