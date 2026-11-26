@@ -8,6 +8,7 @@ import {
   GOOGLE_SERVICE_ACCOUNT_KEY_FILE_ENV,
   GoogleSheetsImportError,
   GoogleSheetsReader,
+  GoogleSheetsWriter,
   parseSpreadsheetUrl,
   type GoogleSheetsApiClient,
 } from "../src/guided-notes/google-sheets-adapter.ts";
@@ -22,6 +23,14 @@ function makeApi(options: {
   values?: readonly (readonly unknown[])[];
   metadataError?: unknown;
   valueError?: unknown;
+  batchUpdateError?: unknown;
+  onBatchUpdate?: (request: {
+    spreadsheetId: string;
+    requestBody: {
+      valueInputOption: "RAW";
+      data: readonly { range: string; values: readonly (readonly (string | number | boolean | null)[])[] }[];
+    };
+  }) => void;
   onValuesRequest?: (request: {
     spreadsheetId: string;
     range: string;
@@ -40,6 +49,11 @@ function makeApi(options: {
           options.onValuesRequest?.(request);
           if (options.valueError !== undefined) throw options.valueError;
           return { data: { values: options.values ?? [] } };
+        },
+        batchUpdate: async (request) => {
+          options.onBatchUpdate?.(request);
+          if (options.batchUpdateError !== undefined) throw options.batchUpdateError;
+          return { data: { totalUpdatedCells: request.requestBody.data.reduce((sum, range) => sum + range.values.flat().length, 0) } };
         },
       },
     },
@@ -146,6 +160,28 @@ test("readWithSource 回傳 spreadsheet ID 與實際選取工作表 gid", async 
   const selectedSheet = await reader.readWithSource(`${spreadsheetUrl}?gid=12`);
   assert.equal(selectedSheet.sheet.name, "第二張");
   assert.deepEqual(selectedSheet.source, { spreadsheetId: "spreadsheet_123", gid: 12 });
+});
+
+test("GoogleSheetsWriter 只透過注入的 API client 發送一次 RAW 批次寫入", async () => {
+  let observedRequest: {
+    spreadsheetId: string;
+    requestBody: {
+      valueInputOption: "RAW";
+      data: readonly { range: string; values: readonly (readonly (string | number | boolean | null)[])[] }[];
+    };
+  } | undefined;
+  const api = makeApi({ onBatchUpdate: (request) => { observedRequest = request; } });
+  const writer = new GoogleSheetsWriter(api);
+  const data = [
+    { range: "'學習單'!D3", values: [["答案"]] },
+    { range: "'學習單'!D4", values: [["第二小題"]] },
+  ];
+
+  assert.equal(await writer.writeRawValues("spreadsheet_123", data), 2);
+  assert.deepEqual(observedRequest, {
+    spreadsheetId: "spreadsheet_123",
+    requestBody: { valueInputOption: "RAW", data },
+  });
 });
 
 test("帶 gid 時讀取指定工作表，不存在時不呼叫 values API", async () => {
@@ -257,7 +293,7 @@ test("建立 reader 僅以環境變數中的檔案路徑初始化 GoogleAuth，�
   );
   assert.ok(reader instanceof GoogleSheetsReader);
   assert.equal(authOptions?.keyFile, "../outside/service-account.json");
-  assert.deepEqual(authOptions?.scopes, ["https://www.googleapis.com/auth/spreadsheets.readonly"]);
+  assert.deepEqual(authOptions?.scopes, ["https://www.googleapis.com/auth/spreadsheets"]);
 });
 
 test("缺少憑證檔路徑環境變數時回報設定錯誤", async () => {

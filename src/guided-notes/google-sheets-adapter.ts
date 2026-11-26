@@ -3,7 +3,7 @@ import type { CellRange, CellValue, GridSheet } from "./model.ts";
 import type { GoogleSpreadsheetSource } from "./import-service.ts";
 
 export const GOOGLE_SERVICE_ACCOUNT_KEY_FILE_ENV = "GOOGLE_SERVICE_ACCOUNT_KEY_FILE";
-const SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
+const SHEETS_READ_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 
 export type GoogleSheetsImportErrorCode =
   | "invalid-url"
@@ -66,8 +66,20 @@ export interface GoogleSheetsApiClient {
         readonly valueRenderOption: "UNFORMATTED_VALUE";
         readonly dateTimeRenderOption: "SERIAL_NUMBER";
       }): Promise<{ readonly data: { readonly values?: readonly (readonly unknown[])[] } }>;
+      batchUpdate(options: {
+        readonly spreadsheetId: string;
+        readonly requestBody: {
+          readonly valueInputOption: "RAW";
+          readonly data: readonly GoogleSheetsValueRange[];
+        };
+      }): Promise<{ readonly data?: { readonly totalUpdatedCells?: number } }>;
     };
   };
+}
+
+export interface GoogleSheetsValueRange {
+  readonly range: string;
+  readonly values: readonly (readonly CellValue[])[];
 }
 
 interface GoogleAuthLike {
@@ -83,6 +95,26 @@ export interface GoogleSheetsAuthOptions {
 export interface GoogleSheetsReaderFactories {
   readonly createAuth?: (options: GoogleSheetsAuthOptions) => GoogleAuthLike;
   readonly createApiClient?: (authClient: unknown) => GoogleSheetsApiClient;
+}
+
+/** Sends a single RAW values batch through an injected Sheets API client. */
+export class GoogleSheetsWriter {
+  private readonly api: GoogleSheetsApiClient;
+
+  constructor(api: GoogleSheetsApiClient) {
+    this.api = api;
+  }
+
+  async writeRawValues(
+    spreadsheetId: string,
+    data: readonly GoogleSheetsValueRange[],
+  ): Promise<number> {
+    const result = await this.api.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: { valueInputOption: "RAW", data },
+    });
+    return result.data?.totalUpdatedCells ?? 0;
+  }
 }
 
 export interface GoogleSheetsReadResult {
@@ -291,7 +323,7 @@ export async function createGoogleSheetsReader(
   try {
     const auth = (factories.createAuth ?? defaultAuthFactory)({
       keyFile,
-      scopes: [SHEETS_READONLY_SCOPE],
+      scopes: [SHEETS_READ_WRITE_SCOPE],
     });
     [credentials, authClient] = await Promise.all([auth.getCredentials(), auth.getClient()]);
   } catch {
