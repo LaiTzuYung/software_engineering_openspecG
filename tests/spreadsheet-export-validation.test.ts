@@ -86,8 +86,8 @@ test("建立與確認快照使用服務端目標，確認會重讀並檢查預�
     { questionNumber: 2, subquestionNumber: 2, answer: "第二答案" },
   ]);
   assert.deepEqual(preview.targets.map(({ cell, status }) => [cell.address, status]), [
-    ["D3", "write"],
-    ["D4", "write"],
+    ["D3", "將寫入"],
+    ["D4", "將寫入"],
   ]);
   assert.match(urls[0]!, /mock-spreadsheet\/edit\?gid=42$/u);
 

@@ -9,6 +9,10 @@ import { createLiveBuzzerServer } from "../src/live-buzzer/http-server.ts";
 import { GuidedNotesImportService } from "../src/guided-notes/import-service.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 import type { GridSheet } from "../src/guided-notes/model.ts";
+import { createImportPreview, type GuidedNotesQuestionSet as QuestionSet } from "../src/guided-notes/import-service.ts";
+import { parseGuidedNotes } from "../src/guided-notes/parser.ts";
+import type { GoogleSheetsValueRange } from "../src/guided-notes/google-sheets-adapter.ts";
+import { GoogleSheetsWriteError } from "../src/guided-notes/google-sheets-adapter.ts";
 
 const PIN = "test-teacher-pin";
 const mockSheet: GridSheet = {
@@ -26,7 +30,7 @@ function fixtureSet(): GuidedNotesQuestionSet {
   };
 }
 
-async function withServer<T>(action: (baseUrl: string, directory: string, app: ReturnType<typeof createLiveBuzzerServer>) => Promise<T>): Promise<T> {
+async function withServer<T>(action: (baseUrl: string, directory: string, app: ReturnType<typeof createLiveBuzzerServer>) => Promise<T>, options: { readSpreadsheet?: () => Promise<GridSheet>; writeSpreadsheetValues?: (id: string, data: readonly GoogleSheetsValueRange[]) => Promise<number> } = {}): Promise<T> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-http-"));
   const questionDirectory = path.join(directory, "guided-notes");
   await mkdir(questionDirectory, { recursive: true });
@@ -35,7 +39,9 @@ async function withServer<T>(action: (baseUrl: string, directory: string, app: R
     teacherPin: PIN,
     dataDirectory: questionDirectory,
     importService: new GuidedNotesImportService(questionDirectory),
-    readSpreadsheet: async () => mockSheet,
+    readSpreadsheet: options.readSpreadsheet ?? (async () => mockSheet),
+    ...(options.writeSpreadsheetValues === undefined ? {} : { writeSpreadsheetValues: options.writeSpreadsheetValues }),
+    exportBackupDirectory: path.join(questionDirectory, "backups"),
     resolveStudentSession: (token) => token === "team-a-session"
       ? { activityCode: "2468", groupId: "group-1" }
       : token === "team-b-session" ? { activityCode: "2468", groupId: "group-2" } : undefined,
@@ -44,6 +50,87 @@ async function withServer<T>(action: (baseUrl: string, directory: string, app: R
   try { return await action(baseUrl, questionDirectory, app); }
   finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
 }
+
+const exportSheet: GridSheet = { name: "匯出測試", rows: [["題號", "題目", "作答"], [1, "匯出題", null]], mergedRanges: [] };
+function exportSet(): QuestionSet {
+  return { ...createImportPreview(parseGuidedNotes(exportSheet)), googleSource: { spreadsheetId: "spreadsheet-export", gid: 31 } };
+}
+
+async function makeEndedExportActivity(app: ReturnType<typeof createLiveBuzzerServer>, set = exportSet()) {
+  const activity = app.manager.create(set, { activityCode: "2468" });
+  activity.stage = "buzzing";
+  assert.equal(submitAnswers(activity, "group-1", 1, { 1: "答案甲" }).accepted, true);
+  app.manager.transition("ended");
+  return activity;
+}
+
+test("回寫預覽 API 顯示 A1、目前值、預計值與中文狀態，並以 RAW 單次批次寫入且先存備份", async () => {
+  let writes = 0;
+  let backupDirectory = "";
+  await withServer(async (base, directory, app) => {
+    backupDirectory = path.join(directory, "backups");
+    await makeEndedExportActivity(app);
+    const previewResponse = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(previewResponse.status, 200);
+    const preview = (await previewResponse.json() as { preview: { id: string; targets: { cell: { address: string }; currentValue: unknown; answer: string; status: string }[] } }).preview;
+    assert.deepEqual(preview.targets.map(({ cell, currentValue, answer, status }) => ({ address: cell.address, currentValue, answer, status })), [
+      { address: "C2", currentValue: null, answer: "答案甲", status: "將寫入" },
+    ]);
+    const confirm = await fetch(`${base}/api/teacher/export/confirm`, { method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: preview.id, targets: [{ cell: { address: "Z99" }, answer: "偽造" }] }) });
+    assert.equal(confirm.status, 200);
+    assert.equal(writes, 1);
+    const files = await readdir(path.join(directory, "backups"));
+    assert.equal(files.length, 1);
+    const backup = JSON.parse(await readFile(path.join(directory, "backups", files[0]!), "utf8")) as { status: string };
+    assert.equal(backup.status, "succeeded");
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async (spreadsheetId, data) => {
+    writes += 1;
+    assert.equal(spreadsheetId, "spreadsheet-export");
+    assert.equal(data.length, 1);
+    assert.deepEqual(data[0], { range: "'匯出測試'!C2", values: [["答案甲"]] });
+    const files = await readdir(backupDirectory);
+    assert.equal(files.length, 1);
+    const backup = JSON.parse(await readFile(path.join(backupDirectory, files[0]!), "utf8")) as { status: string };
+    assert.equal(backup.status, "pending", "batchUpdate must run only after the pending backup is persisted");
+    return 1;
+  } });
+});
+
+test("確認回寫遇到缺少編輯權限時回報中文錯誤並把先前備份標記失敗", async () => {
+  await withServer(async (base, _directory, app) => {
+    await makeEndedExportActivity(app);
+    const preview = (await (await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" })).json() as { preview: { id: string } }).preview;
+    const response = await fetch(`${base}/api/teacher/export/confirm`, { method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: preview.id }) });
+    assert.equal(response.status, 400);
+    const result = await response.json() as { error: string; backupPath: string };
+    assert.match(result.error, /無法寫入試算表（編輯權限不足）/u);
+    assert.match(result.error, /guided-notes-reader@example\.test/u);
+    assert.match(result.error, /「編輯者」/u);
+    const backup = JSON.parse(await readFile(result.backupPath, "utf8")) as { status: string };
+    assert.equal(backup.status, "failed");
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => {
+    throw new GoogleSheetsWriteError("permission-denied", "無法寫入試算表（編輯權限不足）：請將試算表共用給服務帳戶 guided-notes-reader@example.test，並將其設為「編輯者」。");
+  } });
+});
+
+test("回寫路由要求老師 PIN、活動結束、Google 來源與有效預覽 ID", async () => {
+  let writes = 0;
+  await withServer(async (base, _directory, app) => {
+    const noPin = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(noPin.status, 401);
+    const active = app.manager.create(exportSet(), { activityCode: "2468" });
+    const activePreview = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(activePreview.status, 409);
+    active.stage = "ended";
+    const invalid = await fetch(`${base}/api/teacher/export/confirm`, { method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: "not-valid" }) });
+    assert.equal(invalid.status, 400);
+    const xlsxSet = { ...exportSet(), googleSource: undefined } as unknown as QuestionSet;
+    app.manager.create(xlsxSet, { activityCode: "1357" }).stage = "ended";
+    const xlsx = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(xlsx.status, 409);
+    assert.equal(writes, 0);
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
+});
 
 function teacherHeaders(): HeadersInit { return { "x-teacher-pin": PIN, "content-type": "application/json" }; }
 

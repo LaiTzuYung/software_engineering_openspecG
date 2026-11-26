@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { getCellValue } from "./coordinates.ts";
 import type { GoogleSpreadsheetSource, GuidedNotesQuestionSet, PreviewCell } from "./import-service.ts";
 import type { GridSheet, ParsedSubquestion } from "./model.ts";
+import type { GoogleSheetsValueRange } from "./google-sheets-adapter.ts";
 import { parseGuidedNotes } from "./parser.ts";
 
 export interface PlannedSpreadsheetAnswer {
@@ -16,12 +19,28 @@ export interface SpreadsheetExportTarget {
   readonly cell: PreviewCell;
   readonly currentValue: string | number | boolean | null;
   readonly answer: string;
-  readonly status: "write" | "same";
+  readonly status: "將寫入" | "內容相同略過";
 }
 
 export interface SpreadsheetExportPreview {
   readonly id: string;
   readonly targets: readonly SpreadsheetExportTarget[];
+}
+
+export interface SpreadsheetExportWriteResult {
+  readonly preview: SpreadsheetExportPreview;
+  readonly backupPath?: string;
+  readonly updatedCells: number;
+}
+
+export class SpreadsheetExportWriteError extends Error {
+  readonly backupPath: string;
+
+  constructor(message: string, backupPath: string) {
+    super(`${message}（備份檔：${backupPath}）`);
+    this.backupPath = backupPath;
+    this.name = "SpreadsheetExportWriteError";
+  }
 }
 
 export class SpreadsheetStructureMismatchError extends Error {
@@ -186,6 +205,7 @@ function findSubquestion(
 interface StoredPreview {
   readonly questionSet: GuidedNotesQuestionSet;
   readonly preview: SpreadsheetExportPreview;
+  readonly activityCode?: string;
 }
 
 /** Keeps export preview coordinates and answers on the server and validates them again on confirmation. */
@@ -200,6 +220,7 @@ export class SpreadsheetExportPreviewService {
   async create(
     questionSet: GuidedNotesQuestionSet,
     answers: readonly PlannedSpreadsheetAnswer[],
+    activityCode?: string,
   ): Promise<SpreadsheetExportPreview> {
     const { sheet, parsed } = await readAndCompare(questionSet, this.readSpreadsheet);
     const seen = new Set<string>();
@@ -225,21 +246,25 @@ export class SpreadsheetExportPreviewService {
         cell,
         currentValue,
         answer: answer.answer,
-        status: currentValue === answer.answer ? "same" : "write",
+        status: currentValue === answer.answer ? "內容相同略過" : "將寫入",
       };
     });
     const preview: SpreadsheetExportPreview = { id: randomUUID(), targets };
     this.pending.set(preview.id, {
       questionSet: structuredClone(questionSet),
       preview: structuredClone(preview),
+      ...(activityCode === undefined ? {} : { activityCode }),
     });
     return structuredClone(preview);
   }
 
-  async confirm(previewId: string): Promise<SpreadsheetExportPreview> {
+  async confirm(previewId: string, activityCode?: string): Promise<SpreadsheetExportPreview> {
     const stored = this.pending.get(previewId);
     if (stored === undefined) throw new SpreadsheetStructureMismatchError("找不到有效的回寫預覽，請重新產生預覽。");
     this.pending.delete(previewId);
+    if (stored.activityCode !== activityCode) {
+      throw new SpreadsheetStructureMismatchError("回寫預覽不屬於目前活動，請重新產生預覽。");
+    }
 
     const { sheet, parsed } = await readAndCompare(stored.questionSet, this.readSpreadsheet);
     for (const target of stored.preview.targets) {
@@ -252,6 +277,58 @@ export class SpreadsheetExportPreviewService {
       }
     }
     return structuredClone(stored.preview);
+  }
+
+  async confirmAndWrite(
+    previewId: string,
+    activityCode: string,
+    writeRawValues: (spreadsheetId: string, data: readonly GoogleSheetsValueRange[]) => Promise<number>,
+    backupDirectory = path.join(process.cwd(), "data", "spreadsheet-export-backups"),
+  ): Promise<SpreadsheetExportWriteResult> {
+    const stored = this.pending.get(previewId);
+    const preview = await this.confirm(previewId, activityCode);
+    const source = stored?.questionSet.googleSource;
+    if (source === undefined) {
+      throw new SpreadsheetStructureMismatchError("題目集沒有 Google 試算表來源資訊，無法回寫。");
+    }
+    const targets = preview.targets.filter(({ status }) => status === "將寫入");
+    if (targets.length === 0) return { preview, updatedCells: 0 };
+
+    const backupPath = path.join(backupDirectory, `export-${randomUUID()}.json`);
+    const backup = {
+      id: path.basename(backupPath, ".json"),
+      createdAt: new Date().toISOString(),
+      status: "pending" as "pending" | "succeeded" | "failed",
+      spreadsheetId: source.spreadsheetId,
+      gid: source.gid,
+      activityCode,
+      targets: targets.map((target) => ({
+        questionNumber: target.questionNumber,
+        subquestionNumber: target.subquestionNumber,
+        sheetName: target.cell.sheetName,
+        address: target.cell.address,
+        originalValue: target.currentValue,
+        writtenValue: target.answer,
+      })),
+    };
+    await mkdir(backupDirectory, { recursive: true });
+    await writeFile(backupPath, `${JSON.stringify(backup, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+
+    const data: GoogleSheetsValueRange[] = targets.map((target) => ({
+      range: `'${target.cell.sheetName.replace(/'/gu, "''")}'!${target.cell.address}`,
+      values: [[target.answer]],
+    }));
+    try {
+      const updatedCells = await writeRawValues(source.spreadsheetId, data);
+      backup.status = "succeeded";
+      await writeFile(backupPath, `${JSON.stringify(backup, null, 2)}\n`, "utf8");
+      return { preview, backupPath, updatedCells };
+    } catch (error) {
+      backup.status = "failed";
+      const message = error instanceof Error ? error.message : "Google Sheets API 寫入失敗。";
+      await writeFile(backupPath, `${JSON.stringify({ ...backup, error: message }, null, 2)}\n`, "utf8");
+      throw new SpreadsheetExportWriteError(message, backupPath);
+    }
   }
 }
 

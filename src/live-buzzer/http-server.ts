@@ -2,12 +2,16 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { GridSheet } from "../guided-notes/model.ts";
+import type { GoogleSheetsValueRange } from "../guided-notes/google-sheets-adapter.ts";
 import { GuidedNotesImportService } from "../guided-notes/import-service.ts";
+import { createGoogleSheetsReader, createGoogleSheetsWriter } from "../guided-notes/google-sheets-adapter.ts";
+import { SpreadsheetExportPreviewService, SpreadsheetExportWriteError } from "../guided-notes/spreadsheet-export-validation.ts";
 import { createPreviewFromInput } from "../cli.ts";
 import { ActivityManager, transitionActivityStage } from "./model.ts";
 import { QuestionSetRepository } from "./question-sets.ts";
 import { createLiveBuzzerSocketServer } from "./socket-server.ts";
 import { createStudentStatusResponse, createStudentView, createTeacherView } from "./views.ts";
+import { successfulAnswersForExport } from "./result-export.ts";
 import { studentPage, teacherLoginPage, teacherPage } from "./pages.ts";
 
 export interface LiveBuzzerServerOptions {
@@ -15,6 +19,11 @@ export interface LiveBuzzerServerOptions {
   readonly dataDirectory?: string;
   readonly importService?: GuidedNotesImportService;
   readonly readSpreadsheet?: (url: string) => Promise<GridSheet>;
+  readonly writeSpreadsheetValues?: (
+    spreadsheetId: string,
+    data: readonly GoogleSheetsValueRange[],
+  ) => Promise<number>;
+  readonly exportBackupDirectory?: string;
   readonly resolveStudentSession?: (token: string) => { readonly activityCode: string; readonly groupId: string } | undefined;
 }
 
@@ -69,6 +78,9 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
   const dataDirectory = options.dataDirectory;
   const repository = new QuestionSetRepository(dataDirectory);
   const importService = options.importService ?? new GuidedNotesImportService(dataDirectory);
+  const exportReadSpreadsheet = options.readSpreadsheet ?? (async (url: string) =>
+    (await createGoogleSheetsReader()).read(url));
+  const exportPreviews = new SpreadsheetExportPreviewService(exportReadSpreadsheet);
   const studentSessions = new Map<string, { readonly activityCode: string; readonly groupId: string }>();
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -159,6 +171,50 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
           if (typeof body.previewId !== "string") { sendJson(response, 400, { error: "invalid-request" }); return; }
           const questionSet = await importService.confirm(body.previewId);
           sendJson(response, 200, { questionSet }); return;
+        }
+        if (method === "POST" && route === "/api/teacher/export/preview") {
+          const activity = manager.getActive();
+          if (activity === undefined || activity.stage !== "ended") {
+            sendJson(response, 409, { error: "請先結束活動再預覽回寫。" }); return;
+          }
+          if (activity.questionSet.googleSource === undefined) {
+            sendJson(response, 409, { error: "此題目集沒有 Google 試算表來源，無法回寫。" }); return;
+          }
+          const preview = await exportPreviews.create(
+            activity.questionSet,
+            successfulAnswersForExport(activity),
+            activity.activityCode,
+          );
+          sendJson(response, 200, { preview }); return;
+        }
+        if (method === "POST" && route === "/api/teacher/export/confirm") {
+          const body = await readJson(request);
+          if (typeof body.previewId !== "string" || body.previewId.length === 0) {
+            sendJson(response, 400, { error: "請提供有效的回寫預覽 ID。" }); return;
+          }
+          const activity = manager.getActive();
+          if (activity === undefined || activity.stage !== "ended") {
+            sendJson(response, 409, { error: "請先結束活動再確認回寫。" }); return;
+          }
+          if (activity.questionSet.googleSource === undefined) {
+            sendJson(response, 409, { error: "此題目集沒有 Google 試算表來源，無法回寫。" }); return;
+          }
+          const writeRawValues = options.writeSpreadsheetValues ?? (async (spreadsheetId, ranges) =>
+            (await createGoogleSheetsWriter()).writeRawValues(spreadsheetId, ranges));
+          try {
+            const result = await exportPreviews.confirmAndWrite(
+              body.previewId,
+              activity.activityCode,
+              writeRawValues,
+              options.exportBackupDirectory,
+            );
+            sendJson(response, 200, result); return;
+          } catch (error) {
+            if (error instanceof SpreadsheetExportWriteError) {
+              sendJson(response, 400, { error: error.message, backupPath: error.backupPath }); return;
+            }
+            throw error;
+          }
         }
         sendJson(response, 404, { error: "not-found" }); return;
       } catch (error) {

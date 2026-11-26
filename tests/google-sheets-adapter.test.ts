@@ -9,6 +9,7 @@ import {
   GoogleSheetsImportError,
   GoogleSheetsReader,
   GoogleSheetsWriter,
+  GoogleSheetsWriteError,
   parseSpreadsheetUrl,
   type GoogleSheetsApiClient,
 } from "../src/guided-notes/google-sheets-adapter.ts";
@@ -270,6 +271,17 @@ test("權限錯誤從憑證 client_email 取得服務帳號 email", async () => 
       error.code === "permission-denied" &&
       error.message.includes(serviceEmail),
   );
+});
+
+test("讀取與寫入 403 使用不同中文權限錯誤，且寫入錯誤要求服務帳戶為編輯者", async () => {
+  const writer = new GoogleSheetsWriter(makeApi({ batchUpdateError: { response: { status: 403 } } }), serviceEmail);
+  await assert.rejects(writer.writeRawValues("spreadsheet_123", [{ range: "'學習單'!C2", values: [["答案"]] }]),
+    (error: unknown) => error instanceof GoogleSheetsWriteError &&
+      error.message === `無法寫入試算表（編輯權限不足）：請將試算表共用給服務帳戶 ${serviceEmail}，並將其設為「編輯者」。`);
+  const reader = new GoogleSheetsReader(makeApi({ metadataError: { response: { status: 403 } } }), serviceEmail);
+  await assert.rejects(reader.read(spreadsheetUrl),
+    (error: unknown) => error instanceof GoogleSheetsImportError &&
+      error.message === `無法讀取試算表（檢視權限不足）：請將試算表共用給服務帳戶 ${serviceEmail}，並至少設為「檢視者」。`);
 });
 
 test("建立 reader 僅以環境變數中的檔案路徑初始化 GoogleAuth，並讀取 client_email 欄位", async () => {

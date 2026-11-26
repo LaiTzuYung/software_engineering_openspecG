@@ -100,20 +100,26 @@ export interface GoogleSheetsReaderFactories {
 /** Sends a single RAW values batch through an injected Sheets API client. */
 export class GoogleSheetsWriter {
   private readonly api: GoogleSheetsApiClient;
+  private readonly serviceAccountEmail: string;
 
-  constructor(api: GoogleSheetsApiClient) {
+  constructor(api: GoogleSheetsApiClient, serviceAccountEmail = "未知服務帳戶") {
     this.api = api;
+    this.serviceAccountEmail = serviceAccountEmail;
   }
 
   async writeRawValues(
     spreadsheetId: string,
     data: readonly GoogleSheetsValueRange[],
   ): Promise<number> {
-    const result = await this.api.spreadsheets.values.batchUpdate({
-      spreadsheetId,
-      requestBody: { valueInputOption: "RAW", data },
-    });
-    return result.data?.totalUpdatedCells ?? 0;
+    try {
+      const result = await this.api.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: { valueInputOption: "RAW", data },
+      });
+      return result.data?.totalUpdatedCells ?? 0;
+    } catch (error) {
+      throw mapApiWriteError(error, this.serviceAccountEmail);
+    }
   }
 }
 
@@ -230,10 +236,30 @@ function mapApiError(error: unknown, serviceAccountEmail: string): GoogleSheetsI
   if (responseStatus(error) === 403) {
     return new GoogleSheetsImportError(
       "permission-denied",
-      `沒有權限讀取試算表：請將試算表共享給服務帳號 ${serviceAccountEmail}。`,
+      `無法讀取試算表（檢視權限不足）：請將試算表共用給服務帳戶 ${serviceAccountEmail}，並至少設為「檢視者」。`,
     );
   }
   return new GoogleSheetsImportError("api-error", "Google Sheets API 讀取失敗，請確認網址與試算表狀態後重試。");
+}
+
+export class GoogleSheetsWriteError extends Error {
+  readonly code: "permission-denied" | "api-error";
+
+  constructor(code: "permission-denied" | "api-error", message: string) {
+    super(message);
+    this.code = code;
+    this.name = "GoogleSheetsWriteError";
+  }
+}
+
+function mapApiWriteError(error: unknown, serviceAccountEmail: string): GoogleSheetsWriteError {
+  if (responseStatus(error) === 403) {
+    return new GoogleSheetsWriteError(
+      "permission-denied",
+      `無法寫入試算表（編輯權限不足）：請將試算表共用給服務帳戶 ${serviceAccountEmail}，並將其設為「編輯者」。`,
+    );
+  }
+  return new GoogleSheetsWriteError("api-error", "Google Sheets API 寫入失敗，請檢查試算表後重試。");
 }
 
 export class GoogleSheetsReader {
@@ -342,6 +368,42 @@ export async function createGoogleSheetsReader(
   }
 
   return new GoogleSheetsReader(
+    (factories.createApiClient ?? defaultApiFactory)(authClient),
+    serviceAccountEmail,
+  );
+}
+
+export async function createGoogleSheetsWriter(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  factories: GoogleSheetsReaderFactories = {},
+): Promise<GoogleSheetsWriter> {
+  const keyFile = environment[GOOGLE_SERVICE_ACCOUNT_KEY_FILE_ENV];
+  if (keyFile === undefined || keyFile.trim().length === 0) {
+    throw new GoogleSheetsImportError(
+      "credential-config",
+      `缺少環境變數 ${GOOGLE_SERVICE_ACCOUNT_KEY_FILE_ENV}（服務帳戶憑證檔案路徑）。`,
+    );
+  }
+
+  let credentials: { readonly client_email?: string };
+  let authClient: unknown;
+  try {
+    const auth = (factories.createAuth ?? defaultAuthFactory)({
+      keyFile,
+      scopes: [SHEETS_READ_WRITE_SCOPE],
+    });
+    [credentials, authClient] = await Promise.all([auth.getCredentials(), auth.getClient()]);
+  } catch {
+    throw new GoogleSheetsImportError(
+      "credential-config",
+      `無法使用 ${GOOGLE_SERVICE_ACCOUNT_KEY_FILE_ENV} 指定的服務帳戶憑證檔案。`,
+    );
+  }
+  const serviceAccountEmail = credentials.client_email;
+  if (serviceAccountEmail === undefined || serviceAccountEmail.trim().length === 0) {
+    throw new GoogleSheetsImportError("credential-config", "服務帳戶憑證檔缺少有效的 client_email 欄位。");
+  }
+  return new GoogleSheetsWriter(
     (factories.createApiClient ?? defaultApiFactory)(authClient),
     serviceAccountEmail,
   );
