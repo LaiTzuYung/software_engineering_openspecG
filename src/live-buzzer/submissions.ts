@@ -20,6 +20,18 @@ export interface QuestionResult {
   readonly sequence: number | null;
 }
 
+/** Returns each submitted group's question-local rank, ordered by server sequence. */
+export function getQuestionRanks(
+  activity: ActivityState,
+  questionNumber: number,
+): ReadonlyMap<string, number> {
+  const submissions = activity.submissions.get(questionNumber);
+  if (submissions === undefined) return new Map();
+
+  const ordered = [...submissions.values()].sort((left, right) => left.sequence - right.sequence);
+  return new Map(ordered.map((submission, index) => [submission.groupId, index + 1]));
+}
+
 const MAX_ANSWER_CODE_POINTS = 200;
 
 function removeWhitespace(answer: string): string {

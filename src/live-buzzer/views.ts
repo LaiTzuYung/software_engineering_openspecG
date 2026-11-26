@@ -1,5 +1,5 @@
 import type { ActivityState, ActivityStage } from "./model.ts";
-import { getQuestionResults } from "./submissions.ts";
+import { getQuestionRanks, getQuestionResults } from "./submissions.ts";
 
 export interface StudentSubquestionView {
   readonly number: number;
@@ -51,6 +51,7 @@ export interface TeacherView {
       readonly groupName: string;
       readonly submitted: boolean;
       readonly sequence: number | null;
+      readonly rank: number | null;
       readonly answers: readonly StudentAnswerView[] | null;
     }[];
   }[];
@@ -103,12 +104,15 @@ export function createStudentStatusResponse(activity: ActivityState, groupId: st
 /** Builds the teacher view, including all group answers and server order. */
 export function createTeacherView(activity: ActivityState): TeacherView {
   const groups = activity.groups.map((group) => ({ id: group.id, name: group.name }));
-  const questions = activity.questionSet.questions.map((question) => ({
-    number: question.number,
-    description: question.description,
-    subquestions: question.subquestions.map(({ number }) => ({ number })),
-    groups: activity.groups.map((group) => {
+  const questions = activity.questionSet.questions.map((question) => {
+    const ranks = getQuestionRanks(activity, question.number);
+    return {
+      number: question.number,
+      description: question.description,
+      subquestions: question.subquestions.map(({ number }) => ({ number })),
+      groups: activity.groups.map((group) => {
       const submission = activity.submissions.get(question.number)?.get(group.id);
+      const rank = ranks.get(group.id) ?? null;
       let answers: readonly StudentAnswerView[] | null = null;
       if (submission !== undefined) {
         answers = question.subquestions.map((subquestion) => ({
@@ -121,10 +125,12 @@ export function createTeacherView(activity: ActivityState): TeacherView {
         groupName: group.name,
         submitted: submission !== undefined,
         sequence: submission === undefined ? null : submission.sequence,
+        rank,
         answers,
       };
-    }),
-  }));
+      }),
+    };
+  });
 
   return {
     activityCode: activity.activityCode,

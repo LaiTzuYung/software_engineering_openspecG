@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createActivityState, transitionActivityStage } from "../src/live-buzzer/model.ts";
-import { getQuestionResults, submitAnswers } from "../src/live-buzzer/submissions.ts";
+import { getQuestionRanks, getQuestionResults, submitAnswers } from "../src/live-buzzer/submissions.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 
 function questionSet(): GuidedNotesQuestionSet {
@@ -147,4 +147,28 @@ test("calculates the first successful group independently for each question", ()
       sequence: 3,
     },
   ]);
+});
+
+test("calculates each question's ranks from one, regardless of global submission sequence", () => {
+  const activity = buzzingActivity();
+  submitAnswers(activity, "group-2", 1, { 1: "first on question one" });
+  submitAnswers(activity, "group-1", 1, { 1: "second on question one" });
+  const thirdQuestionSubmission = submitAnswers(activity, "group-3", 2, { 1: "first on question two", 2: "second answer" });
+
+  assert.equal(thirdQuestionSubmission.accepted, true);
+  if (thirdQuestionSubmission.accepted) assert.equal(thirdQuestionSubmission.submission.sequence, 3);
+  assert.deepEqual([...getQuestionRanks(activity, 1)], [["group-2", 1], ["group-1", 2]]);
+  assert.deepEqual([...getQuestionRanks(activity, 2)], [["group-3", 1]]);
+});
+
+test("assigns a question-group submission one shared rank for every subquestion", () => {
+  const activity = buzzingActivity();
+  submitAnswers(activity, "group-1", 2, { 1: "part one", 2: "part two" });
+  submitAnswers(activity, "group-3", 2, { 1: "other one", 2: "other two" });
+
+  const ranks = getQuestionRanks(activity, 2);
+  assert.equal(ranks.get("group-1"), 1);
+  assert.equal(ranks.get("group-3"), 2);
+  assert.equal(activity.submissions.get(2)?.get("group-1")?.answers[1], "part one");
+  assert.equal(activity.submissions.get(2)?.get("group-1")?.answers[2], "part two");
 });
