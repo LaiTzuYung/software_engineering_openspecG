@@ -246,6 +246,46 @@ test("authenticated teacher Socket actions update stage and description settings
   assert.equal(activity.showQuestionDescriptions, true);
 });
 
+test("teacher stage and description broadcasts reach students in every group", async (context) => {
+  const manager = new ActivityManager();
+  manager.create(questionSet(), { activityCode: "2468" });
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+
+  const teacher = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+  const groupOne = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  const groupTwo = client(harness.url, { role: "student", sessionToken: "team-b-token" });
+  context.after(() => teacher.disconnect());
+  context.after(() => groupOne.disconnect());
+  context.after(() => groupTwo.disconnect());
+  await Promise.all([
+    connectAndReadTeacherView(teacher),
+    connectAndReadStudentView(groupOne),
+    connectAndReadStudentView(groupTwo),
+  ]);
+
+  const groupOneStarted = nextEvent<{ stage: string }>(groupOne, "activity:student-view");
+  const groupTwoStarted = nextEvent<{ stage: string }>(groupTwo, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:start"), { ok: true, stage: "buzzing" });
+  assert.equal((await groupOneStarted).stage, "buzzing");
+  assert.equal((await groupTwoStarted).stage, "buzzing");
+
+  const groupOneDescription = nextEvent<{ questionDescriptionsVisible: boolean }>(groupOne, "activity:student-view");
+  const groupTwoDescription = nextEvent<{ questionDescriptionsVisible: boolean }>(groupTwo, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:set-question-descriptions", true), {
+    ok: true,
+    visible: true,
+  });
+  assert.equal((await groupOneDescription).questionDescriptionsVisible, true);
+  assert.equal((await groupTwoDescription).questionDescriptionsVisible, true);
+
+  const groupOneEnded = nextEvent<{ stage: string }>(groupOne, "activity:student-view");
+  const groupTwoEnded = nextEvent<{ stage: string }>(groupTwo, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:end"), { ok: true, stage: "ended" });
+  assert.equal((await groupOneEnded).stage, "ended");
+  assert.equal((await groupTwoEnded).stage, "ended");
+});
+
 test("student and unauthenticated Socket clients cannot run teacher actions or request full answers", async (context) => {
   const manager = new ActivityManager();
   const activity = manager.create(questionSet(), { activityCode: "2468" });

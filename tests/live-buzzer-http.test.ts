@@ -131,6 +131,45 @@ test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘�
   });
 });
 
+test("老師透過 HTTP 建立自訂三組活動，且學生可查詢並加入這三組", async () => {
+  await withServer(async (base) => {
+    const createdResponse = await fetch(`${base}/api/teacher/activity`, {
+      method: "POST",
+      headers: teacherHeaders(),
+      body: JSON.stringify({ questionSetId: "seed-set", groupNames: ["甲", "乙", "丙"] }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as {
+      activity: { activityCode: string; groups: { id: string; name: string }[] };
+    };
+    assert.deepEqual(created.activity.groups.map(({ id, name }) => ({ id, name })), [
+      { id: "group-1", name: "甲" },
+      { id: "group-2", name: "乙" },
+      { id: "group-3", name: "丙" },
+    ]);
+
+    const choicesResponse = await fetch(`${base}/api/student/activity?code=${created.activity.activityCode}`);
+    assert.equal(choicesResponse.status, 200);
+    const choices = await choicesResponse.json() as { groups: { id: string; name: string }[] };
+    assert.deepEqual(choices.groups, created.activity.groups);
+
+    const joinedResponse = await fetch(`${base}/api/student/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ activityCode: created.activity.activityCode, groupId: "group-3" }),
+    });
+    assert.equal(joinedResponse.status, 201);
+    const joined = await joinedResponse.json() as {
+      sessionToken: string; activityCode: string; groupId: string; groupName: string;
+    };
+    assert.equal(joined.groupId, "group-3");
+    assert.equal(joined.groupName, "丙");
+    assert.equal(joined.activityCode, created.activity.activityCode);
+    assert.equal(typeof joined.sessionToken, "string");
+    assert.ok(joined.sessionToken.length > 0);
+  });
+});
+
 test("HTTP server 重啟後活動與提交歸零，匯入題目集仍可讀取", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-restart-"));
   const questionDirectory = path.join(directory, "guided-notes");

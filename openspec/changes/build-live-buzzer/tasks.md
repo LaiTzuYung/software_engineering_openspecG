@@ -52,3 +52,4 @@
 - [x] 8.1 老師表格順位改為各題名次（`getQuestionRanks`），spec／design 補充，新增測試。
 - [x] 8.2 提交只推播給提交組（R9 側漏），學生頁保留未送出輸入，spec／design 補充，新增 Socket 測試。
 - [x] 8.3 修正後人工補測（紀錄見 `docs/manual-tests/build-live-buzzer.md` 7.4）。
+- [x] 8.4 依 Verify WARNING 補自訂組別 HTTP 測試與跨組階段／敘述推播測試。
