@@ -7,16 +7,19 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test:unit": "node --experimental-strip-types --test tests/guided-notes-parser.test.ts tests/guided-notes-xlsx-adapter.test.ts tests/google-sheets-adapter.test.ts tests/guided-notes-import-service.test.ts",
+    "test:unit": "node --experimental-strip-types --test tests/**/*.test.ts",
     "test": "npm run typecheck && npm run test:unit",
+    "start": "node --experimental-strip-types src/server.ts",
     "import": "node --experimental-strip-types src/cli.ts"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
+    "socket.io-client": "4.8.4",
     "typescript": "^5.9.3"
   },
   "dependencies": {
     "exceljs": "4.4.0",
-    "googleapis": "189.0.0"
+    "googleapis": "189.0.0",
+    "socket.io": "4.8.4"
   }
 }
