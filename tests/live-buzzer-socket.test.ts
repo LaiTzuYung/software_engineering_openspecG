@@ -95,6 +95,21 @@ function nextEvents<T>(socket: ClientSocket, event: string, count: number): Prom
   });
 }
 
+function assertNoEvent(socket: ClientSocket, event: string, waitMs = 200): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onEvent = () => {
+      clearTimeout(timer);
+      socket.off(event, onEvent);
+      reject(new Error(`不應收到 Socket 事件：${event}`));
+    };
+    const timer = setTimeout(() => {
+      socket.off(event, onEvent);
+      resolve();
+    }, waitMs);
+    socket.on(event, onEvent);
+  });
+}
+
 async function connectAndReadStudentView(socket: ClientSocket): Promise<unknown> {
   const viewPromise = nextEvent(socket, "activity:student-view");
   socket.connect();
@@ -321,6 +336,38 @@ test("student Socket refresh restores stage and submitted state; same-group clie
   assert.deepEqual(await refreshedTab.emitWithAck("student:submit", {
     questionNumber: 7, answers: { 1: "late", 2: "late" },
   }), { ok: false, reason: "activity-not-buzzing" });
+});
+
+test("submission updates only the submitting group while other groups receive no Socket message", async (context) => {
+  const manager = new ActivityManager();
+  const activity = manager.create(questionSet(), { activityCode: "2468" });
+  transitionActivityStage(activity, "buzzing");
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+
+  const submitter = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  const sameGroupPeer = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  const otherGroup = client(harness.url, { role: "student", sessionToken: "team-b-token" });
+  context.after(() => submitter.disconnect());
+  context.after(() => sameGroupPeer.disconnect());
+  context.after(() => otherGroup.disconnect());
+  await Promise.all([
+    connectAndReadStudentView(submitter),
+    connectAndReadStudentView(sameGroupPeer),
+    connectAndReadStudentView(otherGroup),
+  ]);
+
+  const submitterUpdate = nextEvent<{ questions: { subquestions: { submitted: boolean }[] }[] }>(submitter, "activity:student-view");
+  const peerUpdate = nextEvent<{ questions: { subquestions: { submitted: boolean }[] }[] }>(sameGroupPeer, "activity:student-view");
+  const noOtherGroupUpdate = assertNoEvent(otherGroup, "activity:student-view");
+  assert.deepEqual(await submitter.emitWithAck("student:submit", {
+    questionNumber: 7, answers: { 1: "team one", 2: "team two" },
+  }), { ok: true, questionNumber: 7 });
+
+  for (const update of [await submitterUpdate, await peerUpdate]) {
+    assert.equal(update.questions[0]?.subquestions.every(({ submitted }) => submitted), true);
+  }
+  await noOtherGroupUpdate;
 });
 
 test("leaving one student Socket tab does not clear the group's accepted answer or affect another tab", async (context) => {

@@ -77,11 +77,12 @@ function isStudent(socket: Socket): socket is Socket & { data: LiveSocketData } 
   return data.role === "student" && data.studentIdentity !== undefined;
 }
 
-function broadcastStudentViews(io: Server, activity: ActivityState): void {
+function broadcastStudentViews(io: Server, activity: ActivityState, onlyGroupId?: string): void {
   for (const socket of io.sockets.sockets.values()) {
     if (!isStudent(socket)) continue;
     const identity = socket.data.studentIdentity;
     if (identity === undefined || identity.activityCode !== activity.activityCode) continue;
+    if (onlyGroupId !== undefined && identity.groupId !== onlyGroupId) continue;
     const studentView = createStudentView(activity, identity.groupId);
     if (studentView !== undefined) socket.emit("activity:student-view", studentView);
   }
@@ -164,7 +165,7 @@ export function createLiveBuzzerSocketServer(
       }
 
       acknowledge(callback, { ok: true, questionNumber: result.submission.questionNumber });
-      broadcastStudentViews(io, activity);
+      broadcastStudentViews(io, activity, identity.groupId);
       broadcastTeacherView(io, activity);
     });
 
