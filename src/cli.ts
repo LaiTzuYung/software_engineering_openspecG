@@ -24,7 +24,9 @@ export async function createPreviewFromInput(
 ) {
   let result;
   let googleSource: GoogleSpreadsheetSource | undefined;
+  let importSource: "google" | "xlsx" = "google";
   if (/\.xlsx$/iu.test(input)) {
+    importSource = "xlsx";
     const workbook = await readXlsxFile(input);
     const sheet = workbook.sheets[0];
     if (sheet === undefined) throw new Error("XLSX 檔案沒有工作表。");
@@ -49,7 +51,7 @@ export async function createPreviewFromInput(
   }
 
   const service = dependencies.service ?? new GuidedNotesImportService();
-  const preview = service.preview(result, googleSource);
+  const preview = service.preview(result, googleSource, importSource);
   return { preview, service };
 }
 

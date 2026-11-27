@@ -88,6 +88,7 @@ test("XLSX 匯入預覽不帶 Google 試算表來源", async () => {
     const service = new GuidedNotesImportService(directory);
     const { preview } = await createPreviewFromInput(fixture, { service });
     assert.equal(preview.googleSource, undefined);
+    assert.equal(preview.importSource, "xlsx");
     assert.equal((await service.confirm(preview.id)).googleSource, undefined);
   });
 });

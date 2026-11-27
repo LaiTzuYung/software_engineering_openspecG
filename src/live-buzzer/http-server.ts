@@ -115,7 +115,11 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
       }
       try {
         if (method === "GET" && route === "/api/teacher/question-sets") {
-          const items = (await repository.list()).map(({ id, sheetName, totalQuestionCount }) => ({ id, sheetName, totalQuestionCount }));
+          const questionSets = [...await repository.list()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+          const items = questionSets.map(({ id, sheetName, totalQuestionCount, createdAt, googleSource, importSource }) => ({
+            id, sheetName, totalQuestionCount, createdAt,
+            source: googleSource !== undefined ? "google" : importSource ?? "legacy",
+          }));
           sendJson(response, 200, { items }); return;
         }
         if (method === "POST" && route === "/api/teacher/activity") {

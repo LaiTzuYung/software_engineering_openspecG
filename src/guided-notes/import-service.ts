@@ -41,6 +41,7 @@ export interface GuidedNotesQuestionSet {
   readonly createdAt: string;
   readonly sheetName: string;
   readonly googleSource?: GoogleSpreadsheetSource;
+  readonly importSource?: "google" | "xlsx";
   readonly totalQuestionCount: number;
   readonly singleQuestionCount: number;
   readonly groupQuestionCount: number;
@@ -73,6 +74,7 @@ function previewQuestion(question: ParsedQuestion): PreviewQuestion {
 export function createImportPreview(
   result: ParseResult,
   googleSource?: GoogleSpreadsheetSource,
+  importSource: "google" | "xlsx" = googleSource === undefined ? "xlsx" : "google",
 ): GuidedNotesQuestionSet {
   const questions = result.questions.map(previewQuestion);
   return {
@@ -80,6 +82,7 @@ export function createImportPreview(
     createdAt: new Date().toISOString(),
     sheetName: result.sheetName,
     ...(googleSource === undefined ? {} : { googleSource }),
+    importSource,
     totalQuestionCount: questions.length,
     singleQuestionCount: questions.filter(({ type }) => type === "single").length,
     groupQuestionCount: questions.filter(({ type }) => type === "group").length,
@@ -102,8 +105,8 @@ export class GuidedNotesImportService {
     this.dataDirectory = dataDirectory;
   }
 
-  preview(result: ParseResult, googleSource?: GoogleSpreadsheetSource): GuidedNotesQuestionSet {
-    const preview = createImportPreview(result, googleSource);
+  preview(result: ParseResult, googleSource?: GoogleSpreadsheetSource, importSource?: "google" | "xlsx"): GuidedNotesQuestionSet {
+    const preview = createImportPreview(result, googleSource, importSource ?? (googleSource === undefined ? "xlsx" : "google"));
     this.pending.set(preview.id, preview);
     return preview;
   }

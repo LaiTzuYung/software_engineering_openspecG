@@ -93,4 +93,9 @@ test("teacher view includes per-question rank and preserves internal server sequ
 
   const googleActivity = createActivityState({ ...questionSet(), googleSource: { spreadsheetId: "sheets-id", gid: 2 } });
   assert.equal(createTeacherView(googleActivity).canWriteSpreadsheet, true);
+  assert.equal(createTeacherView(googleActivity).questionSetSource, "google");
+  const xlsxActivity = createActivityState({ ...questionSet(), importSource: "xlsx" });
+  assert.equal(createTeacherView(xlsxActivity).questionSetSource, "xlsx");
+  const legacyActivity = createActivityState(questionSet());
+  assert.equal(createTeacherView(legacyActivity).questionSetSource, "legacy");
 });

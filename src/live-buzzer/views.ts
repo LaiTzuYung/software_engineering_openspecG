@@ -41,6 +41,7 @@ export interface TeacherView {
   readonly activityCode: string;
   readonly stage: ActivityStage;
   readonly canWriteSpreadsheet: boolean;
+  readonly questionSetSource: "google" | "xlsx" | "legacy";
   readonly questionDescriptionsVisible: boolean;
   readonly groups: readonly { readonly id: string; readonly name: string }[];
   readonly questions: readonly {
@@ -137,6 +138,7 @@ export function createTeacherView(activity: ActivityState): TeacherView {
     activityCode: activity.activityCode,
     stage: activity.stage,
     canWriteSpreadsheet: activity.questionSet.googleSource !== undefined,
+    questionSetSource: activity.questionSet.googleSource !== undefined ? "google" : activity.questionSet.importSource ?? "legacy",
     questionDescriptionsVisible: activity.showQuestionDescriptions,
     groups,
     questions,

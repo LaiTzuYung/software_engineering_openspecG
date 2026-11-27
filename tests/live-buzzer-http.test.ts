@@ -168,6 +168,22 @@ test("CSV 下載要求老師 PIN 與已結束活動，XLSX 題目集可下載 AS
   });
 });
 
+test("老師題目集清單依匯入時間排序並回傳來源類型與時間，舊版資料仍相容", async () => {
+  await withServer(async (base, directory) => {
+    const xlsx = { ...fixtureSet(), id: "xlsx-set", createdAt: "2026-11-25T14:54:00.000Z", importSource: "xlsx" };
+    const google = { ...fixtureSet(), id: "google-set", createdAt: "2026-11-27T10:25:00.000Z", googleSource: { spreadsheetId: "gid-id", gid: 5 }, importSource: "google" };
+    await writeFile(path.join(directory, "xlsx-set.json"), JSON.stringify(xlsx));
+    await writeFile(path.join(directory, "google-set.json"), JSON.stringify(google));
+    const response = await fetch(`${base}/api/teacher/question-sets`, { headers: teacherHeaders() });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as { items: { id: string; createdAt: string; source: string }[] }).items.map(({ id, createdAt, source }) => ({ id, createdAt, source })), [
+      { id: "google-set", createdAt: "2026-11-27T10:25:00.000Z", source: "google" },
+      { id: "xlsx-set", createdAt: "2026-11-25T14:54:00.000Z", source: "xlsx" },
+      { id: "seed-set", createdAt: "2026-11-22T00:00:00.000Z", source: "legacy" },
+    ]);
+  });
+});
+
 function teacherHeaders(): HeadersInit { return { "x-teacher-pin": PIN, "content-type": "application/json" }; }
 
 test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或老師 API 程式碼", async () => {
@@ -211,6 +227,12 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     assert.match(teacherHtml, /fetch\('\/api\/teacher\/export\/csv',\{headers:\{'x-teacher-pin'/u);
     assert.match(teacherHtml, /URL\.createObjectURL\(blob\)/u);
     assert.match(teacherHtml, /document\.querySelector\('#export-preview-button'\)\.disabled=!canWrite/u);
+    assert.match(teacherHtml, /Asia\/Taipei/u);
+    assert.match(teacherHtml, /Google 試算表/u);
+    assert.match(teacherHtml, /舊版匯入（無來源資訊）/u);
+    assert.match(teacherHtml, /此題目集匯入時未記錄試算表來源，請重新匯入 Google 試算表後再建立活動/u);
+    assert.match(teacherHtml, /題目集來源為 XLSX，無法回寫或還原試算表/u);
+    assert.match(teacherHtml, /select\.selectedIndex=0/u);
     assert.doesNotMatch(teacherHtml, /\/api\/teacher\/export\/csv\?[^'" ]*pin=/u);
     assert.doesNotMatch(teacherHtml, /view\.textContent=JSON\.stringify/u);
 
@@ -240,7 +262,7 @@ test("npm server factory 在同一 HTTP server 提供頁面及 Socket.IO", async
 test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘述並檢視答案", async () => {
   await withServer(async (base, _directory, app) => {
     const list = await fetch(`${base}/api/teacher/question-sets`, { headers: teacherHeaders() });
-    assert.deepEqual(await list.json(), { items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1 }] });
+    assert.deepEqual(await list.json(), { items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1, createdAt: "2026-11-22T00:00:00.000Z", source: "legacy" }] });
     const createdResponse = await fetch(`${base}/api/teacher/activity`, {
       method: "POST", headers: teacherHeaders(), body: JSON.stringify({ questionSetId: "seed-set" }),
     });
@@ -249,6 +271,7 @@ test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘�
     assert.match(created.activity.activityCode, /^\d{4}$/u);
     assert.equal(created.activity.stage, "preparing");
     assert.equal((created.activity as { canWriteSpreadsheet?: boolean }).canWriteSpreadsheet, false);
+    assert.equal((created.activity as { questionSetSource?: string }).questionSetSource, "legacy");
     assert.equal(created.activity.groups.length, 4);
 
     assert.equal((await fetch(`${base}/api/teacher/start`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);
@@ -328,7 +351,7 @@ test("HTTP server 重啟後活動與提交歸零，匯入題目集仍可讀取",
     assert.deepEqual(await activityLookup.json(), { error: "activity-not-found" });
     const questionSets = await fetch(`${secondBase}/api/teacher/question-sets`, { headers: teacherHeaders() });
     assert.deepEqual(await questionSets.json(), {
-      items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1 }],
+      items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1, createdAt: "2026-11-22T00:00:00.000Z", source: "legacy" }],
     });
     first = undefined;
   } finally {

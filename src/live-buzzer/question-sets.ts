@@ -28,6 +28,7 @@ export function isGuidedNotesQuestionSet(value: unknown): value is GuidedNotesQu
   if (!isRecord(value)) return false;
   return typeof value.id === "string" && value.id.length > 0 &&
     typeof value.createdAt === "string" && typeof value.sheetName === "string" &&
+    (value.importSource === undefined || value.importSource === "google" || value.importSource === "xlsx") &&
     Number.isInteger(value.totalQuestionCount) && Array.isArray(value.questions) &&
     value.questions.length === value.totalQuestionCount && value.questions.every(isQuestion) &&
     Number.isInteger(value.singleQuestionCount) && Number.isInteger(value.groupQuestionCount) &&
