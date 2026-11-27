@@ -201,6 +201,17 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     assert.match(teacherHtml, /\/api\/teacher\/import\/preview/u);
     assert.match(teacherHtml, /請輸入網址/u);
     assert.match(teacherHtml, /renderTable/u);
+    assert.match(teacherHtml, /結果匯出/u);
+    assert.match(teacherHtml, /回寫預覽/u);
+    assert.match(teacherHtml, /確認回寫/u);
+    assert.match(teacherHtml, /還原最近一次回寫/u);
+    assert.match(teacherHtml, /下載 CSV/u);
+    assert.match(teacherHtml, /活動資料只存在伺服器記憶體，重啟後消失/u);
+    assert.match(teacherHtml, /題目集來源為 XLSX/u);
+    assert.match(teacherHtml, /fetch\('\/api\/teacher\/export\/csv',\{headers:\{'x-teacher-pin'/u);
+    assert.match(teacherHtml, /URL\.createObjectURL\(blob\)/u);
+    assert.match(teacherHtml, /document\.querySelector\('#export-preview-button'\)\.disabled=!canWrite/u);
+    assert.doesNotMatch(teacherHtml, /\/api\/teacher\/export\/csv\?[^'" ]*pin=/u);
     assert.doesNotMatch(teacherHtml, /view\.textContent=JSON\.stringify/u);
 
     const studentHtml = await (await fetch(`${base}/student`)).text();
@@ -237,6 +248,7 @@ test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘�
     const created = await createdResponse.json() as { activity: { activityCode: string; stage: string; groups: unknown[] } };
     assert.match(created.activity.activityCode, /^\d{4}$/u);
     assert.equal(created.activity.stage, "preparing");
+    assert.equal((created.activity as { canWriteSpreadsheet?: boolean }).canWriteSpreadsheet, false);
     assert.equal(created.activity.groups.length, 4);
 
     assert.equal((await fetch(`${base}/api/teacher/start`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);

@@ -40,6 +40,7 @@ export type StudentStatusResponse =
 export interface TeacherView {
   readonly activityCode: string;
   readonly stage: ActivityStage;
+  readonly canWriteSpreadsheet: boolean;
   readonly questionDescriptionsVisible: boolean;
   readonly groups: readonly { readonly id: string; readonly name: string }[];
   readonly questions: readonly {
@@ -135,6 +136,7 @@ export function createTeacherView(activity: ActivityState): TeacherView {
   return {
     activityCode: activity.activityCode,
     stage: activity.stage,
+    canWriteSpreadsheet: activity.questionSet.googleSource !== undefined,
     questionDescriptionsVisible: activity.showQuestionDescriptions,
     groups,
     questions,
