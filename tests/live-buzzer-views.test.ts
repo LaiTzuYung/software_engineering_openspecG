@@ -85,8 +85,17 @@ test("teacher view includes per-question rank and preserves internal server sequ
   assert.equal(teacherView.questions[0]?.groups[1]?.submitted, true);
   assert.equal(teacherView.questions[0]?.groups[1]?.sequence, 987654);
   assert.equal(teacherView.questions[0]?.groups[1]?.rank, 1);
+  assert.equal(teacherView.canWriteSpreadsheet, false);
   assert.notEqual(teacherView.questions[0]?.groups[1]?.rank, teacherView.questions[0]?.groups[1]?.sequence);
   assert.deepEqual(teacherView.questions[0]?.subquestions, [{ number: 1 }, { number: 2 }]);
   assert.equal(payload.includes("SECRET-ANSWER-B"), true);
   assert.equal(payload.includes("987654"), true);
+
+  const googleActivity = createActivityState({ ...questionSet(), googleSource: { spreadsheetId: "sheets-id", gid: 2 } });
+  assert.equal(createTeacherView(googleActivity).canWriteSpreadsheet, true);
+  assert.equal(createTeacherView(googleActivity).questionSetSource, "google");
+  const xlsxActivity = createActivityState({ ...questionSet(), importSource: "xlsx" });
+  assert.equal(createTeacherView(xlsxActivity).questionSetSource, "xlsx");
+  const legacyActivity = createActivityState(questionSet());
+  assert.equal(createTeacherView(legacyActivity).questionSetSource, "legacy");
 });

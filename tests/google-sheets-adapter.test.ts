@@ -8,6 +8,8 @@ import {
   GOOGLE_SERVICE_ACCOUNT_KEY_FILE_ENV,
   GoogleSheetsImportError,
   GoogleSheetsReader,
+  GoogleSheetsWriter,
+  GoogleSheetsWriteError,
   parseSpreadsheetUrl,
   type GoogleSheetsApiClient,
 } from "../src/guided-notes/google-sheets-adapter.ts";
@@ -22,6 +24,14 @@ function makeApi(options: {
   values?: readonly (readonly unknown[])[];
   metadataError?: unknown;
   valueError?: unknown;
+  batchUpdateError?: unknown;
+  onBatchUpdate?: (request: {
+    spreadsheetId: string;
+    requestBody: {
+      valueInputOption: "RAW";
+      data: readonly { range: string; values: readonly (readonly (string | number | boolean | null)[])[] }[];
+    };
+  }) => void;
   onValuesRequest?: (request: {
     spreadsheetId: string;
     range: string;
@@ -40,6 +50,11 @@ function makeApi(options: {
           options.onValuesRequest?.(request);
           if (options.valueError !== undefined) throw options.valueError;
           return { data: { values: options.values ?? [] } };
+        },
+        batchUpdate: async (request) => {
+          options.onBatchUpdate?.(request);
+          if (options.batchUpdateError !== undefined) throw options.batchUpdateError;
+          return { data: { totalUpdatedCells: request.requestBody.data.reduce((sum, range) => sum + range.values.flat().length, 0) } };
         },
       },
     },
@@ -125,6 +140,48 @@ test("未帶 gid 時選 metadata 中 index 最小的工作表，並以 UNFORMATT
     range: "'第一張'",
     valueRenderOption: "UNFORMATTED_VALUE",
     dateTimeRenderOption: "SERIAL_NUMBER",
+  });
+});
+
+test("readWithSource 回傳 spreadsheet ID 與實際選取工作表 gid", async () => {
+  const reader = new GoogleSheetsReader(
+    makeApi({
+      sheets: [
+        { properties: { sheetId: 12, title: "第二張", index: 1 } },
+        { properties: { sheetId: 2, title: "第一張", index: 0 } },
+      ],
+    }),
+    serviceEmail,
+  );
+
+  const defaultSheet = await reader.readWithSource(spreadsheetUrl);
+  assert.equal(defaultSheet.sheet.name, "第一張");
+  assert.deepEqual(defaultSheet.source, { spreadsheetId: "spreadsheet_123", gid: 2 });
+
+  const selectedSheet = await reader.readWithSource(`${spreadsheetUrl}?gid=12`);
+  assert.equal(selectedSheet.sheet.name, "第二張");
+  assert.deepEqual(selectedSheet.source, { spreadsheetId: "spreadsheet_123", gid: 12 });
+});
+
+test("GoogleSheetsWriter 只透過注入的 API client 發送一次 RAW 批次寫入", async () => {
+  let observedRequest: {
+    spreadsheetId: string;
+    requestBody: {
+      valueInputOption: "RAW";
+      data: readonly { range: string; values: readonly (readonly (string | number | boolean | null)[])[] }[];
+    };
+  } | undefined;
+  const api = makeApi({ onBatchUpdate: (request) => { observedRequest = request; } });
+  const writer = new GoogleSheetsWriter(api);
+  const data = [
+    { range: "'學習單'!D3", values: [["答案"]] },
+    { range: "'學習單'!D4", values: [["第二小題"]] },
+  ];
+
+  assert.equal(await writer.writeRawValues("spreadsheet_123", data), 2);
+  assert.deepEqual(observedRequest, {
+    spreadsheetId: "spreadsheet_123",
+    requestBody: { valueInputOption: "RAW", data },
   });
 });
 
@@ -216,6 +273,17 @@ test("權限錯誤從憑證 client_email 取得服務帳號 email", async () => 
   );
 });
 
+test("讀取與寫入 403 使用不同中文權限錯誤，且寫入錯誤要求服務帳戶為編輯者", async () => {
+  const writer = new GoogleSheetsWriter(makeApi({ batchUpdateError: { response: { status: 403 } } }), serviceEmail);
+  await assert.rejects(writer.writeRawValues("spreadsheet_123", [{ range: "'學習單'!C2", values: [["答案"]] }]),
+    (error: unknown) => error instanceof GoogleSheetsWriteError &&
+      error.message === `無法寫入試算表（編輯權限不足）：請將試算表共用給服務帳戶 ${serviceEmail}，並將其設為「編輯者」。`);
+  const reader = new GoogleSheetsReader(makeApi({ metadataError: { response: { status: 403 } } }), serviceEmail);
+  await assert.rejects(reader.read(spreadsheetUrl),
+    (error: unknown) => error instanceof GoogleSheetsImportError &&
+      error.message === `無法讀取試算表（檢視權限不足）：請將試算表共用給服務帳戶 ${serviceEmail}，並至少設為「檢視者」。`);
+});
+
 test("建立 reader 僅以環境變數中的檔案路徑初始化 GoogleAuth，並讀取 client_email 欄位", async () => {
   let authOptions: { keyFile: string; scopes: readonly string[] } | undefined;
   const api = makeApi();
@@ -237,7 +305,7 @@ test("建立 reader 僅以環境變數中的檔案路徑初始化 GoogleAuth，�
   );
   assert.ok(reader instanceof GoogleSheetsReader);
   assert.equal(authOptions?.keyFile, "../outside/service-account.json");
-  assert.deepEqual(authOptions?.scopes, ["https://www.googleapis.com/auth/spreadsheets.readonly"]);
+  assert.deepEqual(authOptions?.scopes, ["https://www.googleapis.com/auth/spreadsheets"]);
 });
 
 test("缺少憑證檔路徑環境變數時回報設定錯誤", async () => {

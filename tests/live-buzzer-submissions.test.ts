@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createActivityState, transitionActivityStage } from "../src/live-buzzer/model.ts";
 import { getQuestionRanks, getQuestionResults, submitAnswers } from "../src/live-buzzer/submissions.ts";
+import { createResultsCsv } from "../src/live-buzzer/result-csv.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 
 function questionSet(): GuidedNotesQuestionSet {
@@ -92,6 +93,25 @@ test("accepts a complete question-group answer as one submission", () => {
   assert.equal(activity.nextSubmissionSequence, 2);
 });
 
+test("records a server ISO timestamp on each accepted submission and shares it across group answers", () => {
+  const activity = buzzingActivity();
+  const before = Date.now();
+  const single = submitAnswers(activity, "group-1", 1, { 1: "single answer" });
+  const group = submitAnswers(activity, "group-2", 2, { 1: "part one", 2: "part two" });
+  const after = Date.now();
+
+  assert.equal(single.accepted, true);
+  assert.equal(group.accepted, true);
+  if (!single.accepted || !group.accepted) return;
+  for (const submission of [single.submission, group.submission]) {
+    assert.match(submission.submittedAt, /^\d{4}-\d{2}-\d{2}T.*Z$/u);
+    const timestamp = Date.parse(submission.submittedAt);
+    assert.ok(timestamp >= before && timestamp <= after);
+  }
+  assert.equal(Object.keys(group.submission.answers).length, 2);
+  assert.equal(typeof group.submission.submittedAt, "string");
+});
+
 test("orders near-simultaneous submissions by server sequence and accepts one answer per group and question", async () => {
   const activity = buzzingActivity();
   const [first, sameGroupRace, anotherGroup, anotherQuestion] = await Promise.all([
@@ -171,4 +191,28 @@ test("assigns a question-group submission one shared rank for every subquestion"
   assert.equal(ranks.get("group-3"), 2);
   assert.equal(activity.submissions.get(2)?.get("group-1")?.answers[1], "part one");
   assert.equal(activity.submissions.get(2)?.get("group-1")?.answers[2], "part two");
+});
+
+test("CSV 每筆提交每個小題一列，重用各題順位並排序，包含伺服器時間與成功狀態", () => {
+  const activity = createActivityState(questionSet(), { groupNames: ["甲隊", "乙隊", "未提交"] });
+  transitionActivityStage(activity, "buzzing");
+  assert.equal(submitAnswers(activity, "group-1", 1, { 1: "A" }).accepted, true);
+  assert.equal(submitAnswers(activity, "group-2", 1, { 1: "B" }).accepted, true);
+  assert.equal(submitAnswers(activity, "group-2", 2, { 1: "C", 2: "D" }).accepted, true);
+  const firstSubmittedAt = activity.submissions.get(1)!.get("group-1")!.submittedAt;
+  const csv = createResultsCsv(activity);
+  assert.ok(csv.startsWith("\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n"));
+  assert.equal(csv, `\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n1,1,甲隊,A,1,1,是,${firstSubmittedAt},\r\n1,1,乙隊,B,2,2,否,${activity.submissions.get(1)!.get("group-2")!.submittedAt},\r\n2,1,乙隊,C,1,1,是,${activity.submissions.get(2)!.get("group-2")!.submittedAt},\r\n2,2,乙隊,D,1,1,是,${activity.submissions.get(2)!.get("group-2")!.submittedAt},\r\n`);
+  assert.doesNotMatch(csv, /未提交/u);
+  assert.match(firstSubmittedAt, /^\d{4}-\d\d-\d\dT.*Z$/u);
+});
+
+test("CSV 以 UTF-8 BOM 輸出，正確跳脫含逗號、引號、換行與中文的組名和答案", () => {
+  const activity = createActivityState(questionSet(), { groupNames: ['甲,"隊"\n二'] });
+  transitionActivityStage(activity, "buzzing");
+  const answer = '含,逗號"引號\n換行';
+  assert.equal(submitAnswers(activity, "group-1", 1, { 1: answer }).accepted, true);
+  const csv = createResultsCsv(activity);
+  assert.ok(csv.charCodeAt(0) === 0xfeff);
+  assert.match(csv, /"甲,""隊""\n二","含,逗號""引號\n換行",1,1,是,/u);
 });

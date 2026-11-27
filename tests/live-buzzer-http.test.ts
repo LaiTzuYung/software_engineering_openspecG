@@ -9,6 +9,10 @@ import { createLiveBuzzerServer } from "../src/live-buzzer/http-server.ts";
 import { GuidedNotesImportService } from "../src/guided-notes/import-service.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 import type { GridSheet } from "../src/guided-notes/model.ts";
+import { createImportPreview, type GuidedNotesQuestionSet as QuestionSet } from "../src/guided-notes/import-service.ts";
+import { parseGuidedNotes } from "../src/guided-notes/parser.ts";
+import type { GoogleSheetsValueRange } from "../src/guided-notes/google-sheets-adapter.ts";
+import { GoogleSheetsWriteError } from "../src/guided-notes/google-sheets-adapter.ts";
 
 const PIN = "test-teacher-pin";
 const mockSheet: GridSheet = {
@@ -26,7 +30,7 @@ function fixtureSet(): GuidedNotesQuestionSet {
   };
 }
 
-async function withServer<T>(action: (baseUrl: string, directory: string, app: ReturnType<typeof createLiveBuzzerServer>) => Promise<T>): Promise<T> {
+async function withServer<T>(action: (baseUrl: string, directory: string, app: ReturnType<typeof createLiveBuzzerServer>) => Promise<T>, options: { readSpreadsheet?: () => Promise<GridSheet>; writeSpreadsheetValues?: (id: string, data: readonly GoogleSheetsValueRange[]) => Promise<number> } = {}): Promise<T> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-http-"));
   const questionDirectory = path.join(directory, "guided-notes");
   await mkdir(questionDirectory, { recursive: true });
@@ -35,7 +39,9 @@ async function withServer<T>(action: (baseUrl: string, directory: string, app: R
     teacherPin: PIN,
     dataDirectory: questionDirectory,
     importService: new GuidedNotesImportService(questionDirectory),
-    readSpreadsheet: async () => mockSheet,
+    readSpreadsheet: options.readSpreadsheet ?? (async () => mockSheet),
+    ...(options.writeSpreadsheetValues === undefined ? {} : { writeSpreadsheetValues: options.writeSpreadsheetValues }),
+    exportBackupDirectory: path.join(questionDirectory, "backups"),
     resolveStudentSession: (token) => token === "team-a-session"
       ? { activityCode: "2468", groupId: "group-1" }
       : token === "team-b-session" ? { activityCode: "2468", groupId: "group-2" } : undefined,
@@ -44,6 +50,139 @@ async function withServer<T>(action: (baseUrl: string, directory: string, app: R
   try { return await action(baseUrl, questionDirectory, app); }
   finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
 }
+
+const exportSheet: GridSheet = { name: "匯出測試", rows: [["題號", "題目", "作答"], [1, "匯出題", null]], mergedRanges: [] };
+function exportSet(): QuestionSet {
+  return { ...createImportPreview(parseGuidedNotes(exportSheet)), googleSource: { spreadsheetId: "spreadsheet-export", gid: 31 } };
+}
+
+async function makeEndedExportActivity(app: ReturnType<typeof createLiveBuzzerServer>, set = exportSet()) {
+  const activity = app.manager.create(set, { activityCode: "2468" });
+  activity.stage = "buzzing";
+  assert.equal(submitAnswers(activity, "group-1", 1, { 1: "答案甲" }).accepted, true);
+  app.manager.transition("ended");
+  return activity;
+}
+
+test("回寫預覽 API 顯示 A1、目前值、預計值與中文狀態，並以 RAW 單次批次寫入且先存備份", async () => {
+  let writes = 0;
+  let backupDirectory = "";
+  await withServer(async (base, directory, app) => {
+    backupDirectory = path.join(directory, "backups");
+    await makeEndedExportActivity(app);
+    const previewResponse = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(previewResponse.status, 200);
+    const preview = (await previewResponse.json() as { preview: { id: string; targets: { cell: { address: string }; currentValue: unknown; answer: string; status: string }[] } }).preview;
+    assert.deepEqual(preview.targets.map(({ cell, currentValue, answer, status }) => ({ address: cell.address, currentValue, answer, status })), [
+      { address: "C2", currentValue: null, answer: "答案甲", status: "將寫入" },
+    ]);
+    const confirm = await fetch(`${base}/api/teacher/export/confirm`, { method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: preview.id, targets: [{ cell: { address: "Z99" }, answer: "偽造" }] }) });
+    assert.equal(confirm.status, 200);
+    assert.equal(writes, 1);
+    const files = await readdir(path.join(directory, "backups"));
+    assert.equal(files.length, 1);
+    const backup = JSON.parse(await readFile(path.join(directory, "backups", files[0]!), "utf8")) as { status: string };
+    assert.equal(backup.status, "succeeded");
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async (spreadsheetId, data) => {
+    writes += 1;
+    assert.equal(spreadsheetId, "spreadsheet-export");
+    assert.equal(data.length, 1);
+    assert.deepEqual(data[0], { range: "'匯出測試'!C2", values: [["答案甲"]] });
+    const files = await readdir(backupDirectory);
+    assert.equal(files.length, 1);
+    const backup = JSON.parse(await readFile(path.join(backupDirectory, files[0]!), "utf8")) as { status: string };
+    assert.equal(backup.status, "pending", "batchUpdate must run only after the pending backup is persisted");
+    return 1;
+  } });
+});
+
+test("確認回寫遇到缺少編輯權限時回報中文錯誤並把先前備份標記失敗", async () => {
+  await withServer(async (base, _directory, app) => {
+    await makeEndedExportActivity(app);
+    const preview = (await (await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" })).json() as { preview: { id: string } }).preview;
+    const response = await fetch(`${base}/api/teacher/export/confirm`, { method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: preview.id }) });
+    assert.equal(response.status, 400);
+    const result = await response.json() as { error: string; backupPath: string };
+    assert.match(result.error, /無法寫入試算表（編輯權限不足）/u);
+    assert.match(result.error, /guided-notes-reader@example\.test/u);
+    assert.match(result.error, /「編輯者」/u);
+    const backup = JSON.parse(await readFile(result.backupPath, "utf8")) as { status: string };
+    assert.equal(backup.status, "failed");
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => {
+    throw new GoogleSheetsWriteError("permission-denied", "無法寫入試算表（編輯權限不足）：請將試算表共用給服務帳戶 guided-notes-reader@example.test，並將其設為「編輯者」。");
+  } });
+});
+
+test("回寫路由要求老師 PIN、活動結束、Google 來源與有效預覽 ID", async () => {
+  let writes = 0;
+  await withServer(async (base, _directory, app) => {
+    const noPin = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(noPin.status, 401);
+    const active = app.manager.create(exportSet(), { activityCode: "2468" });
+    const activePreview = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(activePreview.status, 409);
+    active.stage = "ended";
+    const invalid = await fetch(`${base}/api/teacher/export/confirm`, { method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: "not-valid" }) });
+    assert.equal(invalid.status, 400);
+    const xlsxSet = { ...exportSet(), googleSource: undefined } as unknown as QuestionSet;
+    app.manager.create(xlsxSet, { activityCode: "1357" }).stage = "ended";
+    const xlsx = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(xlsx.status, 409);
+    assert.equal(writes, 0);
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
+});
+
+test("還原最近一次成功回寫路由要求老師 PIN 與已結束活動，無紀錄時回報清楚結果", async () => {
+  let writes = 0;
+  await withServer(async (base, _directory, app) => {
+    app.manager.create(exportSet(), { activityCode: "2468" }).stage = "buzzing";
+    const unauthorized = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(unauthorized.status, 401);
+    const active = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(active.status, 409);
+    app.manager.getActive()!.stage = "ended";
+    const restored = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(restored.status, 200);
+    assert.deepEqual(await restored.json(), { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" });
+    assert.equal(writes, 0);
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
+});
+
+test("CSV 下載要求老師 PIN 與已結束活動，XLSX 題目集可下載 ASCII 檔名", async () => {
+  await withServer(async (base, _directory, app) => {
+    const noPin = await fetch(`${base}/api/teacher/export/csv`);
+    assert.equal(noPin.status, 401);
+    const activity = app.manager.create(fixtureSet(), { activityCode: "2468" });
+    activity.stage = "buzzing";
+    const active = await fetch(`${base}/api/teacher/export/csv`, { headers: teacherHeaders() });
+    assert.equal(active.status, 409);
+    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "XLSX 答案" }).accepted, true);
+    activity.stage = "ended";
+    const response = await fetch(`${base}/api/teacher/export/csv`, { headers: teacherHeaders() });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/csv; charset=utf-8");
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="results-2468.csv"');
+    const csv = Buffer.from(await response.arrayBuffer()).toString("utf8");
+    assert.ok(csv.startsWith("\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n"));
+    assert.match(csv, /1,1,第 1 組,XLSX 答案,1,1,是,/u);
+  });
+});
+
+test("老師題目集清單依匯入時間排序並回傳來源類型與時間，舊版資料仍相容", async () => {
+  await withServer(async (base, directory) => {
+    const xlsx = { ...fixtureSet(), id: "xlsx-set", createdAt: "2026-11-25T14:54:00.000Z", importSource: "xlsx" };
+    const google = { ...fixtureSet(), id: "google-set", createdAt: "2026-11-27T10:25:00.000Z", googleSource: { spreadsheetId: "gid-id", gid: 5 }, importSource: "google" };
+    await writeFile(path.join(directory, "xlsx-set.json"), JSON.stringify(xlsx));
+    await writeFile(path.join(directory, "google-set.json"), JSON.stringify(google));
+    const response = await fetch(`${base}/api/teacher/question-sets`, { headers: teacherHeaders() });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as { items: { id: string; createdAt: string; source: string }[] }).items.map(({ id, createdAt, source }) => ({ id, createdAt, source })), [
+      { id: "google-set", createdAt: "2026-11-27T10:25:00.000Z", source: "google" },
+      { id: "xlsx-set", createdAt: "2026-11-25T14:54:00.000Z", source: "xlsx" },
+      { id: "seed-set", createdAt: "2026-11-22T00:00:00.000Z", source: "legacy" },
+    ]);
+  });
+});
 
 function teacherHeaders(): HeadersInit { return { "x-teacher-pin": PIN, "content-type": "application/json" }; }
 
@@ -78,6 +217,23 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     assert.match(teacherHtml, /\/api\/teacher\/import\/preview/u);
     assert.match(teacherHtml, /請輸入網址/u);
     assert.match(teacherHtml, /renderTable/u);
+    assert.match(teacherHtml, /結果匯出/u);
+    assert.match(teacherHtml, /回寫預覽/u);
+    assert.match(teacherHtml, /確認回寫/u);
+    assert.match(teacherHtml, /還原最近一次回寫/u);
+    assert.match(teacherHtml, /下載 CSV/u);
+    assert.match(teacherHtml, /活動資料只存在伺服器記憶體，重啟後消失/u);
+    assert.match(teacherHtml, /題目集來源為 XLSX/u);
+    assert.match(teacherHtml, /fetch\('\/api\/teacher\/export\/csv',\{headers:\{'x-teacher-pin'/u);
+    assert.match(teacherHtml, /URL\.createObjectURL\(blob\)/u);
+    assert.match(teacherHtml, /document\.querySelector\('#export-preview-button'\)\.disabled=!canWrite/u);
+    assert.match(teacherHtml, /Asia\/Taipei/u);
+    assert.match(teacherHtml, /Google 試算表/u);
+    assert.match(teacherHtml, /舊版匯入（無來源資訊）/u);
+    assert.match(teacherHtml, /此題目集匯入時未記錄試算表來源，請重新匯入 Google 試算表後再建立活動/u);
+    assert.match(teacherHtml, /題目集來源為 XLSX，無法回寫或還原試算表/u);
+    assert.match(teacherHtml, /select\.selectedIndex=0/u);
+    assert.doesNotMatch(teacherHtml, /\/api\/teacher\/export\/csv\?[^'" ]*pin=/u);
     assert.doesNotMatch(teacherHtml, /view\.textContent=JSON\.stringify/u);
 
     const studentHtml = await (await fetch(`${base}/student`)).text();
@@ -106,7 +262,7 @@ test("npm server factory 在同一 HTTP server 提供頁面及 Socket.IO", async
 test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘述並檢視答案", async () => {
   await withServer(async (base, _directory, app) => {
     const list = await fetch(`${base}/api/teacher/question-sets`, { headers: teacherHeaders() });
-    assert.deepEqual(await list.json(), { items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1 }] });
+    assert.deepEqual(await list.json(), { items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1, createdAt: "2026-11-22T00:00:00.000Z", source: "legacy" }] });
     const createdResponse = await fetch(`${base}/api/teacher/activity`, {
       method: "POST", headers: teacherHeaders(), body: JSON.stringify({ questionSetId: "seed-set" }),
     });
@@ -114,6 +270,8 @@ test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘�
     const created = await createdResponse.json() as { activity: { activityCode: string; stage: string; groups: unknown[] } };
     assert.match(created.activity.activityCode, /^\d{4}$/u);
     assert.equal(created.activity.stage, "preparing");
+    assert.equal((created.activity as { canWriteSpreadsheet?: boolean }).canWriteSpreadsheet, false);
+    assert.equal((created.activity as { questionSetSource?: string }).questionSetSource, "legacy");
     assert.equal(created.activity.groups.length, 4);
 
     assert.equal((await fetch(`${base}/api/teacher/start`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);
@@ -193,7 +351,7 @@ test("HTTP server 重啟後活動與提交歸零，匯入題目集仍可讀取",
     assert.deepEqual(await activityLookup.json(), { error: "activity-not-found" });
     const questionSets = await fetch(`${secondBase}/api/teacher/question-sets`, { headers: teacherHeaders() });
     assert.deepEqual(await questionSets.json(), {
-      items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1 }],
+      items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1, createdAt: "2026-11-22T00:00:00.000Z", source: "legacy" }],
     });
     first = undefined;
   } finally {
