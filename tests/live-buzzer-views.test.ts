@@ -57,21 +57,38 @@ test("student view includes question descriptions only when enabled and rejects 
   assert.equal(view?.questions[0]?.description, "題目敘述不預設提供");
 });
 
-test("ended student view reveals only the successful group's answer and result", () => {
+test("ended student view preserves successful-group results while own answers remain group-scoped", () => {
   const activity = createActivityState(questionSet(), { activityCode: "2468" });
   transitionActivityStage(activity, "buzzing");
   submitAnswers(activity, "group-2", 7, { 1: "SECRET-ANSWER-B", 2: "SECOND-SECRET-B" });
-  transitionActivityStage(activity, "ended");
-
-  const view = createStudentView(activity, "group-1");
-  assert.deepEqual(view?.results, [{
-    questionNumber: 7,
-    successfulGroup: { id: "group-2", name: "第 2 組" },
-    answers: [
-      { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
-      { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
-    ],
-  }]);
+  submitAnswers(activity, "group-1", 7, { 1: "TEAM-A-ANSWER-1", 2: "TEAM-A-ANSWER-2" });
+  for (const stage of ["buzzing", "ended"] as const) {
+    if (stage === "ended") transitionActivityStage(activity, "ended");
+    const view = createStudentView(activity, "group-1");
+    assert.deepEqual(view?.questions[0]?.subquestions, [
+      { number: 1, submitted: true, answer: "TEAM-A-ANSWER-1" },
+      { number: 2, submitted: true, answer: "TEAM-A-ANSWER-2" },
+    ]);
+    if (stage === "buzzing") {
+      assert.equal(view?.results, null);
+      const payload = JSON.stringify(view);
+      assert.equal(payload.includes("SECRET-ANSWER-B"), false);
+      assert.equal(payload.includes("SECOND-SECRET-B"), false);
+      assert.equal(payload.includes("group-2"), false);
+      assert.equal(payload.includes("第 2 組"), false);
+      assert.equal(payload.includes("rank"), false);
+      assert.equal(payload.includes("sequence"), false);
+    } else {
+      assert.deepEqual(view?.results, [{
+        questionNumber: 7,
+        successfulGroup: { id: "group-2", name: "第 2 組" },
+        answers: [
+          { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
+          { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
+        ],
+      }]);
+    }
+  }
 });
 
 test("teacher view includes per-question rank and preserves internal server sequence", () => {
