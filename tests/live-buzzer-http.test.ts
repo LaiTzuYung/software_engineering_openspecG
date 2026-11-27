@@ -382,6 +382,49 @@ test("真實 HTTP 學生路由在結束前回應不含他組答案與順位", as
   });
 });
 
+test("HTTP 學生視圖在活動進行中及結束後只包含本組已提交答案", async () => {
+  await withServer(async (base, _directory, app) => {
+    const activity = app.manager.create(fixtureSet(), { activityCode: "2468" });
+    activity.stage = "buzzing";
+    activity.nextSubmissionSequence = 987654;
+    assert.equal(submitAnswers(activity, "group-2", 1, { 1: "SECRET-ANSWER-B" }).accepted, true);
+    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "TEAM-A-ANSWER" }).accepted, true);
+
+    for (const stage of ["buzzing", "ended"] as const) {
+      activity.stage = stage;
+      const response = await fetch(`${base}/api/student/state?code=2468&group=group-1`, {
+        headers: { "x-student-session": "team-a-session" },
+      });
+      assert.equal(response.status, 200);
+      const view = await response.json() as {
+        questions: { subquestions: { submitted: boolean; answer?: string }[] }[];
+        results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null }[] | null;
+      };
+      assert.equal(view.questions[0]?.subquestions[0]?.answer, "TEAM-A-ANSWER");
+      if (stage === "buzzing") {
+        assert.equal(view.results, null);
+        const ownAnswers = JSON.stringify(view.questions.flatMap(({ subquestions }) => subquestions.map(({ answer }) => answer)));
+        assert.equal(ownAnswers.includes("SECRET-ANSWER-B"), false);
+        assert.equal(JSON.stringify(view).includes("group-2"), false);
+        assert.equal(JSON.stringify(view).includes("rank"), false);
+        assert.equal(JSON.stringify(view).includes("sequence"), false);
+        assert.equal(JSON.stringify(view).includes("987654"), false);
+      } else {
+        assert.deepEqual(view.results, [{
+          questionNumber: 1,
+          successfulGroup: { id: "group-2", name: "第 2 組" },
+          answers: [{ subquestionNumber: 1, answer: "SECRET-ANSWER-B" }],
+        }]);
+        const ownAnswers = view.questions.flatMap(({ subquestions }) => subquestions.map(({ answer }) => answer));
+        assert.deepEqual(ownAnswers, ["TEAM-A-ANSWER"]);
+        assert.equal(JSON.stringify(view).includes("rank"), false);
+        assert.equal(JSON.stringify(view).includes("sequence"), false);
+        assert.equal(JSON.stringify(view).includes("987654"), false);
+      }
+    }
+  });
+});
+
 test("活動代碼查詢成功時只回傳所有組別 id／名稱，不含作答資料或順位", async () => {
   await withServer(async (base, _directory, app) => {
     const activity = app.manager.create(fixtureSet(), { activityCode: "2468" });
@@ -445,7 +488,7 @@ test("學生頁加入時將代碼與所選組別送至伺服器並把回傳身�
     assert.match(page, /activity:student-view/u);
     assert.match(page, /等待老師開始/u);
     assert.match(page, /本組已送出/u);
-    assert.match(page, /成功組別/u);
+    assert.match(page, /查看本組答案/u);
     assert.match(page, /answerInputs\.some\(input=>input\.value\.trim\(\)===''/u);
     assert.match(page, /submit\.disabled=answerInputs/u);
     assert.match(page, /答案不可空白/u);
