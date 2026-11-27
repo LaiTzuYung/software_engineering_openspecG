@@ -225,6 +225,12 @@ test("備份每次獨立保存來源、座標、時間、狀態與型別；還�
     const restoreData: GoogleSheetsValueRange[][] = [];
     const result = await service.restoreLatest(originalSet, async () => current, async (_id, data) => {
       restoreData.push([...data]);
+      for (const item of data) {
+        const rowIndex = item.range.includes("D3") ? 2 : 3;
+        current = { ...current, rows: current.rows.map((row, index) => index === rowIndex
+          ? [...row.slice(0, 3), item.values[0]![0] as string | number | boolean | null]
+          : row) };
+      }
       return data.length;
     }, backupDirectory);
     assert.equal(result.backupPath, first.backupPath, "failed attempt must not replace latest successful backup");
@@ -247,8 +253,70 @@ test("沒有成功回寫備份時回報明確結果且不呼叫寫入", async ()
     const service = new SpreadsheetExportPreviewService(async () => sheet());
     let writeCalls = 0;
     const result = await service.restoreLatest(importedSet(), async () => sheet(), async () => { writeCalls += 1; return 1; }, backupDirectory);
-    assert.deepEqual(result, { restored: [], skipped: [], message: "沒有可還原的成功回寫紀錄。" });
+    assert.deepEqual(result, { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" });
     assert.equal(writeCalls, 0);
+  } finally {
+    await rm(backupDirectory, { recursive: true, force: true });
+  }
+});
+
+test("空白原值還原時以空字串寫入並重新讀取確認已清空", async () => {
+  const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "export-blank-restore-"));
+  let current: GridSheet = { ...sheet(), rows: sheet().rows.map((row, index) => index === 2 ? [...row.slice(0, 3), null] : row) };
+  const service = new SpreadsheetExportPreviewService(async () => current);
+  try {
+    const preview = await service.create(importedSet(), [
+      { questionNumber: 2, subquestionNumber: 1, answer: "must-clear" },
+    ], "blank-restore");
+    const written = await service.confirmAndWrite(preview.id, "blank-restore", async (_id, data) => {
+      current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "must-clear"] : row) };
+      return data.length;
+    }, backupDirectory);
+    assert.ok(written.backupPath);
+
+    let restoreRequest: readonly GoogleSheetsValueRange[] | undefined;
+    let readCount = 0;
+    const result = await service.restoreLatest(importedSet(), async () => {
+      readCount += 1;
+      return current;
+    }, async (_id, data) => {
+      restoreRequest = data;
+      current = { ...current, rows: current.rows.map((row, index) => index === 2
+        ? [...row.slice(0, 3), data[0]!.values[0]![0] as string]
+        : row) };
+      return 1;
+    }, backupDirectory);
+    assert.deepEqual(restoreRequest, [{ range: "'學習單'!D3", values: [[""]] }]);
+    assert.equal(restoreRequest!.some(({ values }) => values.flat().some((value) => value === null)), false);
+    assert.equal(readCount, 2, "restore must reread after writing");
+    assert.deepEqual(result.restored, [{ address: "學習單!D3" }]);
+    assert.deepEqual(result.failed, []);
+    assert.equal(current.rows[2]?.[3], "");
+  } finally {
+    await rm(backupDirectory, { recursive: true, force: true });
+  }
+});
+
+test("還原後重新讀取仍不等於原值時列為失敗而非已還原", async () => {
+  const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "export-restore-mismatch-"));
+  let current: GridSheet = { ...sheet(), rows: sheet().rows.map((row, index) => index === 2 ? [...row.slice(0, 3), null] : row) };
+  const service = new SpreadsheetExportPreviewService(async () => current);
+  try {
+    const preview = await service.create(importedSet(), [
+      { questionNumber: 2, subquestionNumber: 1, answer: "must-restore" },
+    ], "restore-mismatch");
+    await service.confirmAndWrite(preview.id, "restore-mismatch", async () => {
+      current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "must-restore"] : row) };
+      return 1;
+    }, backupDirectory);
+    const result = await service.restoreLatest(importedSet(), async () => current, async () => 1, backupDirectory);
+    assert.deepEqual(result.restored, []);
+    assert.deepEqual(result.failed, [{
+      address: "學習單!D3",
+      reason: "還原後重新讀取的內容與備份原值不同。",
+      actualValue: "must-restore",
+      expectedValue: null,
+    }]);
   } finally {
     await rm(backupDirectory, { recursive: true, force: true });
   }

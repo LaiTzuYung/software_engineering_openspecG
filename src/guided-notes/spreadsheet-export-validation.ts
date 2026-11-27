@@ -42,6 +42,12 @@ export interface SpreadsheetExportRestoreResult {
     readonly currentValue: CellValue;
     readonly expectedValue: CellValue;
   }[];
+  readonly failed: readonly {
+    readonly address: string;
+    readonly reason: string;
+    readonly actualValue: CellValue;
+    readonly expectedValue: CellValue;
+  }[];
   readonly message?: string;
 }
 
@@ -373,7 +379,7 @@ export class SpreadsheetExportPreviewService {
       names = await readdir(backupDirectory);
     } catch (error) {
       if (isMissingDirectory(error)) {
-        return { restored: [], skipped: [], message: "沒有可還原的成功回寫紀錄。" };
+        return { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" };
       }
       throw error;
     }
@@ -389,11 +395,12 @@ export class SpreadsheetExportPreviewService {
     }
     backups.sort((left, right) => right.value.createdAt.localeCompare(left.value.createdAt));
     const latest = backups[0];
-    if (latest === undefined) return { restored: [], skipped: [], message: "沒有可還原的成功回寫紀錄。" };
+    if (latest === undefined) return { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" };
 
     const { sheet, parsed } = await readAndCompare(questionSet, readSpreadsheet);
     const restored: { address: string }[] = [];
     const skipped: { address: string; reason: string; currentValue: CellValue; expectedValue: CellValue }[] = [];
+    const candidates: { address: string; sheetName: string; cellAddress: string; row: number; column: number; originalValue: CellValue }[] = [];
     const data: GoogleSheetsValueRange[] = [];
     for (const target of latest.value.targets) {
       const subquestion = findSubquestion(parsed, target.questionNumber, target.subquestionNumber);
@@ -408,11 +415,37 @@ export class SpreadsheetExportPreviewService {
         skipped.push({ address, reason: "目前內容與當次回寫值不同，為避免覆蓋後續修改而跳過。", currentValue, expectedValue: target.writtenValue });
         continue;
       }
-      data.push({ range: `'${target.sheetName.replace(/'/gu, "''")}'!${target.address}`, values: [[target.originalValue]] });
-      restored.push({ address });
+      data.push({
+        range: `'${target.sheetName.replace(/'/gu, "''")}'!${target.address}`,
+        values: [[target.originalValue === null ? "" : target.originalValue]],
+      });
+      candidates.push({
+        address, sheetName: target.sheetName, cellAddress: target.address,
+        row: subquestion.answerCell.row, column: subquestion.answerCell.column,
+        originalValue: target.originalValue,
+      });
     }
-    if (data.length > 0) await writeRawValues(source.spreadsheetId, data);
-    return { backupPath: latest.path, restored, skipped };
+    const failed: { address: string; reason: string; actualValue: CellValue; expectedValue: CellValue }[] = [];
+    if (data.length > 0) {
+      await writeRawValues(source.spreadsheetId, data);
+      const afterRestore = await readSpreadsheet(sourceUrl(source));
+      for (const candidate of candidates) {
+        const actualValue = getCellValue(afterRestore, candidate.row, candidate.column);
+        const actualBlank = actualValue === null || actualValue === "";
+        const expectedBlank = candidate.originalValue === null || candidate.originalValue === "";
+        if ((actualBlank && expectedBlank) || actualValue === candidate.originalValue) {
+          restored.push({ address: candidate.address });
+        } else {
+          failed.push({
+            address: candidate.address,
+            reason: "還原後重新讀取的內容與備份原值不同。",
+            actualValue,
+            expectedValue: candidate.originalValue,
+          });
+        }
+      }
+    }
+    return { backupPath: latest.path, restored, skipped, failed };
   }
 }
 

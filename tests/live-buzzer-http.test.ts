@@ -143,7 +143,7 @@ test("還原最近一次成功回寫路由要求老師 PIN 與已結束活動，
     app.manager.getActive()!.stage = "ended";
     const restored = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: teacherHeaders(), body: "{}" });
     assert.equal(restored.status, 200);
-    assert.deepEqual(await restored.json(), { restored: [], skipped: [], message: "沒有可還原的成功回寫紀錄。" });
+    assert.deepEqual(await restored.json(), { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" });
     assert.equal(writes, 0);
   }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
 });
