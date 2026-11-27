@@ -12,6 +12,7 @@ import { QuestionSetRepository } from "./question-sets.ts";
 import { createLiveBuzzerSocketServer } from "./socket-server.ts";
 import { createStudentStatusResponse, createStudentView, createTeacherView } from "./views.ts";
 import { successfulAnswersForExport } from "./result-export.ts";
+import { createResultsCsv } from "./result-csv.ts";
 import { studentPage, teacherLoginPage, teacherPage } from "./pages.ts";
 
 export interface LiveBuzzerServerOptions {
@@ -233,6 +234,19 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             options.exportBackupDirectory,
           );
           sendJson(response, 200, result); return;
+        }
+        if (method === "GET" && route === "/api/teacher/export/csv") {
+          const activity = manager.getActive();
+          if (activity === undefined || activity.stage !== "ended") {
+            sendJson(response, 409, { error: "請先結束活動再下載 CSV。" }); return;
+          }
+          const filename = `results-${activity.activityCode}.csv`;
+          response.writeHead(200, {
+            "content-type": "text/csv; charset=utf-8",
+            "content-disposition": `attachment; filename="${filename}"`,
+            "cache-control": "no-store",
+          });
+          response.end(createResultsCsv(activity), "utf8"); return;
         }
         sendJson(response, 404, { error: "not-found" }); return;
       } catch (error) {

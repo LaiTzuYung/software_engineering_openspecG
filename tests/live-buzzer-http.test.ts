@@ -148,6 +148,26 @@ test("還原最近一次成功回寫路由要求老師 PIN 與已結束活動，
   }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
 });
 
+test("CSV 下載要求老師 PIN 與已結束活動，XLSX 題目集可下載 ASCII 檔名", async () => {
+  await withServer(async (base, _directory, app) => {
+    const noPin = await fetch(`${base}/api/teacher/export/csv`);
+    assert.equal(noPin.status, 401);
+    const activity = app.manager.create(fixtureSet(), { activityCode: "2468" });
+    activity.stage = "buzzing";
+    const active = await fetch(`${base}/api/teacher/export/csv`, { headers: teacherHeaders() });
+    assert.equal(active.status, 409);
+    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "XLSX 答案" }).accepted, true);
+    activity.stage = "ended";
+    const response = await fetch(`${base}/api/teacher/export/csv`, { headers: teacherHeaders() });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/csv; charset=utf-8");
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="results-2468.csv"');
+    const csv = Buffer.from(await response.arrayBuffer()).toString("utf8");
+    assert.ok(csv.startsWith("\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n"));
+    assert.match(csv, /1,1,第 1 組,XLSX 答案,1,1,是,/u);
+  });
+});
+
 function teacherHeaders(): HeadersInit { return { "x-teacher-pin": PIN, "content-type": "application/json" }; }
 
 test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或老師 API 程式碼", async () => {
