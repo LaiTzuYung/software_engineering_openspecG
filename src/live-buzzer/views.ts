@@ -4,6 +4,7 @@ import { getQuestionRanks, getQuestionResults } from "./submissions.ts";
 export interface StudentSubquestionView {
   readonly number: number;
   readonly submitted: boolean;
+  readonly answer?: string;
 }
 
 export interface StudentQuestionView {
@@ -68,9 +69,11 @@ export function createStudentView(activity: ActivityState, groupId: string): Stu
   if (group === undefined) return undefined;
 
   const questions: StudentQuestionView[] = activity.questionSet.questions.map((question) => {
+    const submission = activity.submissions.get(question.number)?.get(groupId);
     const subquestions: StudentSubquestionView[] = question.subquestions.map((subquestion) => ({
       number: subquestion.number,
-      submitted: activity.submissions.get(question.number)?.has(groupId) ?? false,
+      submitted: submission !== undefined,
+      ...(submission === undefined ? {} : { answer: submission.answers[subquestion.number] ?? "" }),
     }));
     if (activity.showQuestionDescriptions) {
       return { number: question.number, description: question.description, subquestions };

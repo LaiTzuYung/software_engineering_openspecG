@@ -185,6 +185,68 @@ test("initial, update, query and reconnect Socket payloads never include another
   assertDoesNotContainSecretOrRank(reconnectView);
 });
 
+test("Socket student views expose only the current group's answers before and after end", async (context) => {
+  const manager = new ActivityManager();
+  const activity = manager.create(questionSet(), { activityCode: "2468" });
+  transitionActivityStage(activity, "buzzing");
+  activity.nextSubmissionSequence = 987654;
+  assert.equal(submitAnswers(activity, "group-2", 7, { 1: "SECRET-ANSWER-B", 2: "SECOND-SECRET-B" }).accepted, true);
+  assert.equal(submitAnswers(activity, "group-1", 7, { 1: "TEAM-A-ANSWER-1", 2: "TEAM-A-ANSWER-2" }).accepted, true);
+
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+  const student = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  context.after(() => student.disconnect());
+
+  const assertOnlyTeamAAnswers = (view: unknown): void => {
+    const serialized = JSON.stringify(view);
+    assert.equal(serialized.includes("TEAM-A-ANSWER-1"), true);
+    assert.equal(serialized.includes("TEAM-A-ANSWER-2"), true);
+    assert.equal(serialized.includes("SECRET-ANSWER-B"), false);
+    assert.equal(serialized.includes("SECOND-SECRET-B"), false);
+    assert.equal(serialized.includes("group-2"), false);
+    assert.equal(serialized.includes("第 2 組"), false);
+    assert.equal(serialized.includes("rank"), false);
+    assert.equal(serialized.includes("sequence"), false);
+    assert.equal(serialized.includes("987654"), false);
+  };
+
+  const initialView = await connectAndReadStudentView(student) as {
+    questions: { subquestions: { submitted: boolean; answer?: string }[] }[];
+  };
+  assert.deepEqual(initialView.questions[0]?.subquestions, [
+    { number: 1, submitted: true, answer: "TEAM-A-ANSWER-1" },
+    { number: 2, submitted: true, answer: "TEAM-A-ANSWER-2" },
+  ]);
+  assertOnlyTeamAAnswers(initialView);
+
+  const teacher = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+  context.after(() => teacher.disconnect());
+  await connectAndReadTeacherView(teacher);
+  const endedViewPromise = nextEvent(student, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:end"), { ok: true, stage: "ended" });
+  const endedView = await endedViewPromise as {
+    stage: string;
+    questions: { subquestions: { answer?: string }[] }[];
+    results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null }[] | null;
+  };
+  assert.equal(endedView.stage, "ended");
+  assert.deepEqual(endedView.results, [{
+    questionNumber: 7,
+    successfulGroup: { id: "group-2", name: "第 2 組" },
+    answers: [
+      { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
+      { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
+    ],
+  }]);
+  assert.deepEqual(endedView.questions[0]?.subquestions.map(({ answer }) => answer), ["TEAM-A-ANSWER-1", "TEAM-A-ANSWER-2"]);
+  assert.equal(JSON.stringify(endedView.questions).includes("SECRET-ANSWER-B"), false);
+  assert.equal(JSON.stringify(endedView.questions).includes("group-2"), false);
+  assert.equal(JSON.stringify(endedView).includes("rank"), false);
+  assert.equal(JSON.stringify(endedView).includes("sequence"), false);
+  assert.equal(JSON.stringify(endedView).includes("987654"), false);
+});
+
 test("two Socket clients submitting the same question near-simultaneously get server-ordered unique sequences", async (context) => {
   const manager = new ActivityManager();
   const activity = manager.create(questionSet(), { activityCode: "2468" });
@@ -355,7 +417,8 @@ test("student Socket refresh restores stage and submitted state; same-group clie
   }), { ok: true, questionNumber: 7 });
   const update = await syncedView;
   assert.equal(update.questions[0]?.subquestions.every(({ submitted }) => submitted), true);
-  assert.equal(JSON.stringify(update).includes("team answer"), false);
+  assert.equal(JSON.stringify(update).includes("team answer"), true);
+  assert.equal(JSON.stringify(update).includes("second answer"), true);
   assert.deepEqual(await secondTab.emitWithAck("student:submit", {
     questionNumber: 7, answers: { 1: "different", 2: "answer" },
   }), { ok: false, reason: "already-submitted" });
