@@ -132,6 +132,22 @@ test("回寫路由要求老師 PIN、活動結束、Google 來源與有效預覽
   }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
 });
 
+test("還原最近一次成功回寫路由要求老師 PIN 與已結束活動，無紀錄時回報清楚結果", async () => {
+  let writes = 0;
+  await withServer(async (base, _directory, app) => {
+    app.manager.create(exportSet(), { activityCode: "2468" }).stage = "buzzing";
+    const unauthorized = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(unauthorized.status, 401);
+    const active = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(active.status, 409);
+    app.manager.getActive()!.stage = "ended";
+    const restored = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(restored.status, 200);
+    assert.deepEqual(await restored.json(), { restored: [], skipped: [], message: "沒有可還原的成功回寫紀錄。" });
+    assert.equal(writes, 0);
+  }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
+});
+
 function teacherHeaders(): HeadersInit { return { "x-teacher-pin": PIN, "content-type": "application/json" }; }
 
 test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或老師 API 程式碼", async () => {

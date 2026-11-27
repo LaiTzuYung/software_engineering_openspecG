@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getCellValue } from "./coordinates.ts";
 import type { GoogleSpreadsheetSource, GuidedNotesQuestionSet, PreviewCell } from "./import-service.ts";
-import type { GridSheet, ParsedSubquestion } from "./model.ts";
+import type { CellValue, GridSheet, ParsedSubquestion } from "./model.ts";
 import type { GoogleSheetsValueRange } from "./google-sheets-adapter.ts";
 import { parseGuidedNotes } from "./parser.ts";
 
@@ -31,6 +31,35 @@ export interface SpreadsheetExportWriteResult {
   readonly preview: SpreadsheetExportPreview;
   readonly backupPath?: string;
   readonly updatedCells: number;
+}
+
+export interface SpreadsheetExportRestoreResult {
+  readonly backupPath?: string;
+  readonly restored: readonly { readonly address: string }[];
+  readonly skipped: readonly {
+    readonly address: string;
+    readonly reason: string;
+    readonly currentValue: CellValue;
+    readonly expectedValue: CellValue;
+  }[];
+  readonly message?: string;
+}
+
+interface SpreadsheetExportBackup {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly status: "pending" | "succeeded" | "failed";
+  readonly spreadsheetId: string;
+  readonly gid?: number;
+  readonly activityCode: string;
+  readonly targets: readonly {
+    readonly questionNumber: number;
+    readonly subquestionNumber: number;
+    readonly sheetName: string;
+    readonly address: string;
+    readonly originalValue: CellValue;
+    readonly writtenValue: CellValue;
+  }[];
 }
 
 export class SpreadsheetExportWriteError extends Error {
@@ -330,6 +359,65 @@ export class SpreadsheetExportPreviewService {
       throw new SpreadsheetExportWriteError(message, backupPath);
     }
   }
+
+  async restoreLatest(
+    questionSet: GuidedNotesQuestionSet,
+    readSpreadsheet: (url: string) => Promise<GridSheet>,
+    writeRawValues: (spreadsheetId: string, data: readonly GoogleSheetsValueRange[]) => Promise<number>,
+    backupDirectory = path.join(process.cwd(), "data", "spreadsheet-export-backups"),
+  ): Promise<SpreadsheetExportRestoreResult> {
+    const source = questionSet.googleSource;
+    if (source === undefined) throw new SpreadsheetStructureMismatchError("題目集沒有 Google 試算表來源資訊，無法還原。");
+    let names: string[];
+    try {
+      names = await readdir(backupDirectory);
+    } catch (error) {
+      if (isMissingDirectory(error)) {
+        return { restored: [], skipped: [], message: "沒有可還原的成功回寫紀錄。" };
+      }
+      throw error;
+    }
+    const backups: { path: string; value: SpreadsheetExportBackup }[] = [];
+    for (const name of names.filter((item) => item.endsWith(".json"))) {
+      const backupPath = path.join(backupDirectory, name);
+      try {
+        const value = JSON.parse(await readFile(backupPath, "utf8")) as SpreadsheetExportBackup;
+        if (value.status === "succeeded" && value.spreadsheetId === source.spreadsheetId && value.gid === source.gid && Array.isArray(value.targets)) {
+          backups.push({ path: backupPath, value });
+        }
+      } catch { /* Ignore incomplete or malformed backup files. */ }
+    }
+    backups.sort((left, right) => right.value.createdAt.localeCompare(left.value.createdAt));
+    const latest = backups[0];
+    if (latest === undefined) return { restored: [], skipped: [], message: "沒有可還原的成功回寫紀錄。" };
+
+    const { sheet, parsed } = await readAndCompare(questionSet, readSpreadsheet);
+    const restored: { address: string }[] = [];
+    const skipped: { address: string; reason: string; currentValue: CellValue; expectedValue: CellValue }[] = [];
+    const data: GoogleSheetsValueRange[] = [];
+    for (const target of latest.value.targets) {
+      const subquestion = findSubquestion(parsed, target.questionNumber, target.subquestionNumber);
+      const address = `${target.sheetName}!${target.address}`;
+      if (subquestion === undefined || subquestion.answerCell.sheetName !== target.sheetName ||
+          toPreviewCell(subquestion.answerCell).address !== target.address) {
+        skipped.push({ address, reason: "目前作答格位置與備份不一致。", currentValue: null, expectedValue: target.writtenValue });
+        continue;
+      }
+      const currentValue = getCellValue(sheet, subquestion.answerCell.row, subquestion.answerCell.column);
+      if (currentValue !== target.writtenValue) {
+        skipped.push({ address, reason: "目前內容與當次回寫值不同，為避免覆蓋後續修改而跳過。", currentValue, expectedValue: target.writtenValue });
+        continue;
+      }
+      data.push({ range: `'${target.sheetName.replace(/'/gu, "''")}'!${target.address}`, values: [[target.originalValue]] });
+      restored.push({ address });
+    }
+    if (data.length > 0) await writeRawValues(source.spreadsheetId, data);
+    return { backupPath: latest.path, restored, skipped };
+  }
+}
+
+function isMissingDirectory(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 export async function validateGoogleQuestionSetStructure(

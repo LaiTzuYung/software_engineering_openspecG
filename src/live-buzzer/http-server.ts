@@ -216,6 +216,24 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             throw error;
           }
         }
+        if (method === "POST" && route === "/api/teacher/export/restore") {
+          const activity = manager.getActive();
+          if (activity === undefined || activity.stage !== "ended") {
+            sendJson(response, 409, { error: "請先結束活動再還原回寫。" }); return;
+          }
+          if (activity.questionSet.googleSource === undefined) {
+            sendJson(response, 409, { error: "此題目集沒有 Google 試算表來源，無法還原。" }); return;
+          }
+          const writeRawValues = options.writeSpreadsheetValues ?? (async (spreadsheetId, ranges) =>
+            (await createGoogleSheetsWriter()).writeRawValues(spreadsheetId, ranges));
+          const result = await exportPreviews.restoreLatest(
+            activity.questionSet,
+            exportReadSpreadsheet,
+            writeRawValues,
+            options.exportBackupDirectory,
+          );
+          sendJson(response, 200, result); return;
+        }
         sendJson(response, 404, { error: "not-found" }); return;
       } catch (error) {
         sendJson(response, 400, { error: error instanceof Error ? error.message : "request-failed" }); return;
