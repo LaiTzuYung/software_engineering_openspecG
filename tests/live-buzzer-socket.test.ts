@@ -161,6 +161,7 @@ test("initial, update, query and reconnect Socket payloads never include another
   };
   assert.equal(initialView.questions[0]?.description, undefined);
   assertDoesNotContainSecretOrRank(initialView);
+  assert.equal(JSON.stringify(initialView).includes("onlineStudentPages"), false);
 
   const stateResponse = await studentSocket.emitWithAck("student:get-state");
   assert.equal(isOkResponse(stateResponse), true);
@@ -179,10 +180,49 @@ test("initial, update, query and reconnect Socket payloads never include another
   assert.equal(updateView.questionDescriptionsVisible, true);
   assert.equal(updateView.questions[0]?.description, "題目敘述");
   assertDoesNotContainSecretOrRank(updateView);
+  assert.equal(JSON.stringify(updateView).includes("onlineStudentPages"), false);
 
   studentSocket.disconnect();
   const reconnectView = await connectAndReadStudentView(studentSocket);
   assertDoesNotContainSecretOrRank(reconnectView);
+});
+
+test("teacher Socket view updates group page counts on student join and disconnect only", async (context) => {
+  const manager = new ActivityManager();
+  manager.create(questionSet(), { activityCode: "2468" });
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+
+  const teacherSocket = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+  context.after(() => teacherSocket.disconnect());
+  const initial = await connectAndReadTeacherView(teacherSocket) as {
+    groups: { id: string; onlineStudentPages: number }[];
+  };
+  assert.deepEqual(initial.groups.map(({ onlineStudentPages }) => onlineStudentPages), [0, 0, 0, 0]);
+
+  const firstStudent = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  context.after(() => firstStudent.disconnect());
+  const joinedUpdate = nextEvent(teacherSocket, "activity:teacher-view") as Promise<{
+    groups: { id: string; onlineStudentPages: number }[];
+  }>;
+  const firstStudentView = await connectAndReadStudentView(firstStudent);
+  assert.equal(JSON.stringify(firstStudentView).includes("onlineStudentPages"), false);
+  assert.deepEqual((await joinedUpdate).groups.map(({ onlineStudentPages }) => onlineStudentPages), [1, 0, 0, 0]);
+
+  const secondStudent = client(harness.url, { role: "student", sessionToken: "team-b-token" });
+  context.after(() => secondStudent.disconnect());
+  const secondJoinedUpdate = nextEvent(teacherSocket, "activity:teacher-view") as Promise<{
+    groups: { id: string; onlineStudentPages: number }[];
+  }>;
+  const secondStudentView = await connectAndReadStudentView(secondStudent);
+  assert.equal(JSON.stringify(secondStudentView).includes("onlineStudentPages"), false);
+  assert.deepEqual((await secondJoinedUpdate).groups.map(({ onlineStudentPages }) => onlineStudentPages), [1, 1, 0, 0]);
+
+  const leftUpdate = nextEvent(teacherSocket, "activity:teacher-view") as Promise<{
+    groups: { id: string; onlineStudentPages: number }[];
+  }>;
+  firstStudent.disconnect();
+  assert.deepEqual((await leftUpdate).groups.map(({ onlineStudentPages }) => onlineStudentPages), [0, 1, 0, 0]);
 });
 
 test("Socket student views expose only the current group's answers before and after end", async (context) => {

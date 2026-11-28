@@ -44,9 +44,8 @@ export function createActivityState(
   options: CreateActivityOptions = {},
 ): ActivityState {
   const groupNames = options.groupNames ?? DEFAULT_GROUP_NAMES;
-  if (groupNames.length === 0 || groupNames.some((name) => name.trim().length === 0)) {
-    throw new Error("活動至少需要一組，且組名不可空白。");
-  }
+  if (groupNames.length < 2 || groupNames.length > 10) throw new Error("活動組數須為 2～10 組。");
+  if (groupNames.some((name) => name.trim().length === 0)) throw new Error("組名不可空白。");
 
   return {
     activityCode: options.activityCode ?? generateActivityCode(),

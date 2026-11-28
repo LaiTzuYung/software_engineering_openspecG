@@ -5,8 +5,16 @@ export const RESULT_CSV_HEADERS = [
   "題號", "小題", "組別", "答案", "原始順位", "最終順位", "是否成功", "送出時間", "說明",
 ] as const;
 
+/** Formats a server ISO timestamp as Taiwan local time without changing stored submission data. */
+export function formatCsvSubmittedAt(submittedAt: string): string {
+  const timestamp = Date.parse(submittedAt);
+  if (!Number.isFinite(timestamp)) throw new RangeError("提交時間不是有效的 ISO 時間。");
+  return `${new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 19)}+08:00`;
+}
+
 function escapeCsv(value: string | number): string {
-  const text = String(value);
+  const valueText = String(value);
+  const text = /^[=+\-@\t\r\n]/u.test(valueText) ? `'${valueText}` : valueText;
   return /[,"\r\n]/u.test(text) ? `"${text.replace(/"/gu, '""')}"` : text;
 }
 
@@ -19,10 +27,12 @@ export function createResultsCsv(activity: ActivityState): string {
   for (const question of activity.questionSet.questions) {
     const ranks = getQuestionRanks(activity, question.number);
     const submissions = [...(activity.submissions.get(question.number)?.values() ?? [])];
+    let hasExportableSubmission = false;
     for (const submission of submissions) {
       const rank = ranks.get(submission.groupId);
       const group = activity.groups.find(({ id }) => id === submission.groupId);
       if (rank === undefined || group === undefined) continue;
+      hasExportableSubmission = true;
       for (const subquestion of question.subquestions) {
         rows.push({
           question: question.number,
@@ -36,11 +46,19 @@ export function createResultsCsv(activity: ActivityState): string {
             rank,
             rank,
             successfulGroups.get(question.number) === submission.groupId ? "是" : "否",
-            submission.submittedAt,
+            formatCsvSubmittedAt(submission.submittedAt),
             "",
           ],
         });
       }
+    }
+    if (!hasExportableSubmission) {
+      rows.push({
+        question: question.number,
+        subquestion: 0,
+        rank: 0,
+        fields: [question.number, "", "", "", "", "", "", "", "沒有組別送出"],
+      });
     }
   }
   rows.sort((left, right) => left.question - right.question || left.subquestion - right.subquestion || left.rank - right.rank);

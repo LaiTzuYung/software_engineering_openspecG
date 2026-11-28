@@ -44,7 +44,11 @@ export interface TeacherView {
   readonly canWriteSpreadsheet: boolean;
   readonly questionSetSource: "google" | "xlsx" | "legacy";
   readonly questionDescriptionsVisible: boolean;
-  readonly groups: readonly { readonly id: string; readonly name: string }[];
+  readonly groups: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly onlineStudentPages: number;
+  }[];
   readonly questions: readonly {
     readonly number: number;
     readonly description: string;
@@ -107,8 +111,15 @@ export function createStudentStatusResponse(activity: ActivityState, groupId: st
 }
 
 /** Builds the teacher view, including all group answers and server order. */
-export function createTeacherView(activity: ActivityState): TeacherView {
-  const groups = activity.groups.map((group) => ({ id: group.id, name: group.name }));
+export function createTeacherView(
+  activity: ActivityState,
+  onlineStudentPages: ReadonlyMap<string, number> = new Map(),
+): TeacherView {
+  const groups = activity.groups.map((group) => ({
+    id: group.id,
+    name: group.name,
+    onlineStudentPages: onlineStudentPages.get(group.id) ?? 0,
+  }));
   const questions = activity.questionSet.questions.map((question) => {
     const ranks = getQuestionRanks(activity, question.number);
     return {

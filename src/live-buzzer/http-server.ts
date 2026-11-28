@@ -9,7 +9,7 @@ import { SpreadsheetExportPreviewService, SpreadsheetExportWriteError } from "..
 import { createPreviewFromInput } from "../cli.ts";
 import { ActivityManager, transitionActivityStage } from "./model.ts";
 import { QuestionSetRepository } from "./question-sets.ts";
-import { createLiveBuzzerSocketServer } from "./socket-server.ts";
+import { countOnlineStudentPages, createLiveBuzzerSocketServer } from "./socket-server.ts";
 import { createStudentStatusResponse, createStudentView, createTeacherView } from "./views.ts";
 import { successfulAnswersForExport } from "./result-export.ts";
 import { createResultsCsv } from "./result-csv.ts";
@@ -73,6 +73,10 @@ function readPin(request: IncomingMessage): string | undefined {
   return typeof header === "string" ? header : cookiePin(request);
 }
 
+function teacherActivityView(activity: import("./model.ts").ActivityState, io: import("socket.io").Server) {
+  return createTeacherView(activity, countOnlineStudentPages(io, activity));
+}
+
 export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): LiveBuzzerServer {
   const teacherPin = options.teacherPin ?? process.env.TEACHER_PIN ?? randomBytes(4).toString("hex").toUpperCase();
   const manager = new ActivityManager();
@@ -130,7 +134,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
           const groupNames = Array.isArray(body.groupNames) && body.groupNames.every((name) => typeof name === "string")
             ? body.groupNames as string[] : undefined;
           const activity = manager.create(set, groupNames === undefined ? {} : { groupNames });
-          sendJson(response, 201, { activity: createTeacherView(activity) }); return;
+          sendJson(response, 201, { activity: teacherActivityView(activity, socketServer) }); return;
         }
         if (method === "POST" && (route === "/api/teacher/start" || route === "/api/teacher/end")) {
           const activity = manager.getActive();
@@ -141,9 +145,9 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
               if (view !== undefined) client.emit("activity:student-view", view);
-            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(activity));
+            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", teacherActivityView(activity, io));
           }
-          sendJson(response, 200, { activity: createTeacherView(activity) }); return;
+          sendJson(response, 200, { activity: teacherActivityView(activity, io) }); return;
         }
         if (method === "POST" && route === "/api/teacher/descriptions") {
           const body = await readJson(request);
@@ -154,13 +158,13 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
               if (view !== undefined) client.emit("activity:student-view", view);
-            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(activity));
+            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", teacherActivityView(activity, socketServer));
           }
-          sendJson(response, 200, { activity: createTeacherView(activity) }); return;
+          sendJson(response, 200, { activity: teacherActivityView(activity, socketServer) }); return;
         }
         if (method === "GET" && route === "/api/teacher/view") {
           const activity = manager.getActive();
-          sendJson(response, 200, activity === undefined ? { activity: null } : { activity: createTeacherView(activity) }); return;
+          sendJson(response, 200, activity === undefined ? { activity: null } : { activity: teacherActivityView(activity, socketServer) }); return;
         }
         if (method === "POST" && route === "/api/teacher/import/preview") {
           const body = await readJson(request);

@@ -77,6 +77,17 @@ function isStudent(socket: Socket): socket is Socket & { data: LiveSocketData } 
   return data.role === "student" && data.studentIdentity !== undefined;
 }
 
+export function countOnlineStudentPages(io: Server, activity: ActivityState): ReadonlyMap<string, number> {
+  const counts = new Map(activity.groups.map(({ id }) => [id, 0]));
+  for (const socket of io.sockets.sockets.values()) {
+    if (!socket.connected || !isStudent(socket)) continue;
+    const identity = socket.data.studentIdentity;
+    if (identity === undefined || identity.activityCode !== activity.activityCode || !counts.has(identity.groupId)) continue;
+    counts.set(identity.groupId, counts.get(identity.groupId)! + 1);
+  }
+  return counts;
+}
+
 function broadcastStudentViews(io: Server, activity: ActivityState, onlyGroupId?: string): void {
   for (const socket of io.sockets.sockets.values()) {
     if (!isStudent(socket)) continue;
@@ -89,7 +100,7 @@ function broadcastStudentViews(io: Server, activity: ActivityState, onlyGroupId?
 }
 
 function broadcastTeacherView(io: Server, activity: ActivityState): void {
-  const teacherView = createTeacherView(activity);
+  const teacherView = createTeacherView(activity, countOnlineStudentPages(io, activity));
   for (const socket of io.sockets.sockets.values()) {
     if (isTeacher(socket)) socket.emit("activity:teacher-view", teacherView);
   }
@@ -124,10 +135,13 @@ export function createLiveBuzzerSocketServer(
       if (activity !== undefined) {
         const studentView = createStudentView(activity, identity.groupId);
         if (studentView !== undefined) socket.emit("activity:student-view", studentView);
+        broadcastTeacherView(io, activity);
       }
     } else if (socketData.role === "teacher") {
       const activity = getActiveActivity(manager);
-      if (activity !== undefined) socket.emit("activity:teacher-view", createTeacherView(activity));
+      if (activity !== undefined) {
+        socket.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(io, activity)));
+      }
     }
 
     socket.on("student:get-state", (callback: unknown) => {
@@ -219,7 +233,15 @@ export function createLiveBuzzerSocketServer(
         acknowledge(callback, { ok: false, reason: "activity-unavailable" });
         return;
       }
-      acknowledge(callback, { ok: true, view: createTeacherView(activity) });
+      acknowledge(callback, { ok: true, view: createTeacherView(activity, countOnlineStudentPages(io, activity)) });
+    });
+
+    socket.on("disconnect", () => {
+      if (!isStudent(socket)) return;
+      const activity = getActiveActivity(manager);
+      if (activity !== undefined && socket.data.studentIdentity?.activityCode === activity.activityCode) {
+        broadcastTeacherView(io, activity);
+      }
     });
   });
 

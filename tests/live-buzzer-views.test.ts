@@ -45,6 +45,7 @@ test("student view uses an explicit allowlist and excludes other groups' answers
   assert.equal(payload.includes("987654"), false);
   assert.equal(payload.includes('"sequence"'), false);
   assert.equal(payload.includes('"answers"'), false);
+  assert.equal(payload.includes("onlineStudentPages"), false);
 });
 
 test("student view includes question descriptions only when enabled and rejects unknown groups", () => {
@@ -103,6 +104,7 @@ test("teacher view includes per-question rank and preserves internal server sequ
   assert.equal(teacherView.questions[0]?.groups[1]?.sequence, 987654);
   assert.equal(teacherView.questions[0]?.groups[1]?.rank, 1);
   assert.equal(teacherView.canWriteSpreadsheet, false);
+  assert.deepEqual(teacherView.groups.map(({ onlineStudentPages }) => onlineStudentPages), [0, 0, 0, 0]);
   assert.notEqual(teacherView.questions[0]?.groups[1]?.rank, teacherView.questions[0]?.groups[1]?.sequence);
   assert.deepEqual(teacherView.questions[0]?.subquestions, [{ number: 1 }, { number: 2 }]);
   assert.equal(payload.includes("SECRET-ANSWER-B"), true);

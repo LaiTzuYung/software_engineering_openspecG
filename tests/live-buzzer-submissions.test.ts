@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createActivityState, transitionActivityStage } from "../src/live-buzzer/model.ts";
 import { getQuestionRanks, getQuestionResults, submitAnswers } from "../src/live-buzzer/submissions.ts";
-import { createResultsCsv } from "../src/live-buzzer/result-csv.ts";
+import { createResultsCsv, formatCsvSubmittedAt } from "../src/live-buzzer/result-csv.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 
 function questionSet(): GuidedNotesQuestionSet {
@@ -112,6 +112,10 @@ test("records a server ISO timestamp on each accepted submission and shares it a
   assert.equal(typeof group.submission.submittedAt, "string");
 });
 
+test("CSV 送出時間轉為台灣 UTC+8，精確到秒且不含毫秒", () => {
+  assert.equal(formatCsvSubmittedAt("2026-11-27T13:47:01.559Z"), "2026-11-27T21:47:01+08:00");
+});
+
 test("orders near-simultaneous submissions by server sequence and accepts one answer per group and question", async () => {
   const activity = buzzingActivity();
   const [first, sameGroupRace, anotherGroup, anotherQuestion] = await Promise.all([
@@ -202,17 +206,53 @@ test("CSV 每筆提交每個小題一列，重用各題順位並排序，包含�
   const firstSubmittedAt = activity.submissions.get(1)!.get("group-1")!.submittedAt;
   const csv = createResultsCsv(activity);
   assert.ok(csv.startsWith("\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n"));
-  assert.equal(csv, `\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n1,1,甲隊,A,1,1,是,${firstSubmittedAt},\r\n1,1,乙隊,B,2,2,否,${activity.submissions.get(1)!.get("group-2")!.submittedAt},\r\n2,1,乙隊,C,1,1,是,${activity.submissions.get(2)!.get("group-2")!.submittedAt},\r\n2,2,乙隊,D,1,1,是,${activity.submissions.get(2)!.get("group-2")!.submittedAt},\r\n`);
+  assert.equal(csv, `\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n1,1,甲隊,A,1,1,是,${formatCsvSubmittedAt(firstSubmittedAt)},\r\n1,1,乙隊,B,2,2,否,${formatCsvSubmittedAt(activity.submissions.get(1)!.get("group-2")!.submittedAt)},\r\n2,1,乙隊,C,1,1,是,${formatCsvSubmittedAt(activity.submissions.get(2)!.get("group-2")!.submittedAt)},\r\n2,2,乙隊,D,1,1,是,${formatCsvSubmittedAt(activity.submissions.get(2)!.get("group-2")!.submittedAt)},\r\n`);
   assert.doesNotMatch(csv, /未提交/u);
   assert.match(firstSubmittedAt, /^\d{4}-\d\d-\d\dT.*Z$/u);
 });
 
 test("CSV 以 UTF-8 BOM 輸出，正確跳脫含逗號、引號、換行與中文的組名和答案", () => {
-  const activity = createActivityState(questionSet(), { groupNames: ['甲,"隊"\n二'] });
+  const activity = createActivityState(questionSet(), { groupNames: ['甲,"隊"\n二', "未提交組"] });
   transitionActivityStage(activity, "buzzing");
   const answer = '含,逗號"引號\n換行';
   assert.equal(submitAnswers(activity, "group-1", 1, { 1: answer }).accepted, true);
   const csv = createResultsCsv(activity);
   assert.ok(csv.charCodeAt(0) === 0xfeff);
   assert.match(csv, /"甲,""隊""\n二","含,逗號""引號\n換行",1,1,是,/u);
+});
+
+test("CSV 對所有欄位的公式前綴加單引號", () => {
+  const base = questionSet();
+  const values = ["+plus", "-minus", "@at", "\ttab", "\nline"];
+  const set: GuidedNotesQuestionSet = {
+    ...base,
+    totalQuestionCount: values.length,
+    singleQuestionCount: values.length,
+    groupQuestionCount: 0,
+    questions: values.map((_, index) => ({
+      number: index + 1,
+      description: "題目 " + (index + 1),
+      type: "single",
+      subquestions: [{ number: 1, answerCell: { sheetName: "學習單", address: "A" + (index + 1), row: index + 1, column: 1 } }],
+    })),
+  };
+  const activity = createActivityState(set, { groupNames: ["=公式組", "一般組"] });
+  transitionActivityStage(activity, "buzzing");
+  values.forEach((answer, index) => assert.equal(submitAnswers(activity, "group-1", index + 1, { 1: answer }).accepted, true));
+
+  const csv = createResultsCsv(activity);
+  assert.match(csv, /'=公式組/u);
+  assert.match(csv, /,'\+plus,/u);
+  assert.match(csv, /,'-minus,/u);
+  assert.match(csv, /,'@at,/u);
+  assert.match(csv, /,'\ttab,/u);
+  assert.match(csv, /,"'\nline",/u);
+});
+
+test("CSV 為完全沒有組別送出的題目輸出空白佔位列", () => {
+  const activity = buzzingActivity();
+  assert.equal(submitAnswers(activity, "group-1", 1, { 1: "已送出答案" }).accepted, true);
+
+  const csv = createResultsCsv(activity);
+  assert.match(csv, /\r\n2,,,,,,,,沒有組別送出\r\n/u);
 });
