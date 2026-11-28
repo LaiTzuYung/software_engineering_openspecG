@@ -62,6 +62,19 @@ test("activity stage transitions allow only preparing to buzzing to ended", () =
   assert.equal(activity.stage, "ended");
 });
 
+test("活動組數只接受 2 到 10 組，拒絕時保留原活動", () => {
+  const manager = new ActivityManager();
+  const original = manager.create(questionSet(), { activityCode: "1234" });
+
+  assert.throws(() => manager.create(questionSet(), { groupNames: ["一組"] }), /組數須為 2～10 組/u);
+  assert.equal(manager.getActive(), original);
+  assert.equal(manager.create(questionSet(), { groupNames: ["一組", "二組"] }).groups.length, 2);
+  assert.equal(manager.create(questionSet(), { groupNames: Array.from({ length: 10 }, (_, i) => `第 ${i + 1} 組`) }).groups.length, 10);
+  const tenGroupActivity = manager.getActive();
+  assert.throws(() => manager.create(questionSet(), { groupNames: Array.from({ length: 11 }, (_, i) => `第 ${i + 1} 組`) }), /組數須為 2～10 組/u);
+  assert.equal(manager.getActive(), tenGroupActivity);
+});
+
 test("question set repository reads valid JSON from a temporary directory", async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-sets-"));
   try {

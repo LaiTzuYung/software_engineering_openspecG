@@ -212,6 +212,7 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     }
     assert.match(teacherHtml, /建立活動/u);
     assert.match(teacherHtml, /開始搶答/u);
+    assert.match(teacherHtml, /線上頁面：/u);
     assert.match(teacherHtml, /結束活動/u);
     assert.match(teacherHtml, /題目敘述/u);
     assert.match(teacherHtml, /\/api\/teacher\/import\/preview/u);
@@ -298,7 +299,7 @@ test("老師透過 HTTP 建立自訂三組活動，且學生可查詢並加入�
     });
     assert.equal(createdResponse.status, 201);
     const created = await createdResponse.json() as {
-      activity: { activityCode: string; groups: { id: string; name: string }[] };
+      activity: { activityCode: string; groups: { id: string; name: string; onlineStudentPages: number }[] };
     };
     assert.deepEqual(created.activity.groups.map(({ id, name }) => ({ id, name })), [
       { id: "group-1", name: "甲" },
@@ -309,7 +310,7 @@ test("老師透過 HTTP 建立自訂三組活動，且學生可查詢並加入�
     const choicesResponse = await fetch(`${base}/api/student/activity?code=${created.activity.activityCode}`);
     assert.equal(choicesResponse.status, 200);
     const choices = await choicesResponse.json() as { groups: { id: string; name: string }[] };
-    assert.deepEqual(choices.groups, created.activity.groups);
+    assert.deepEqual(choices.groups, created.activity.groups.map(({ id, name }) => ({ id, name })));
 
     const joinedResponse = await fetch(`${base}/api/student/join`, {
       method: "POST",
@@ -325,6 +326,58 @@ test("老師透過 HTTP 建立自訂三組活動，且學生可查詢並加入�
     assert.equal(joined.activityCode, created.activity.activityCode);
     assert.equal(typeof joined.sessionToken, "string");
     assert.ok(joined.sessionToken.length > 0);
+  });
+});
+
+test("老師建立活動拒絕 1 或 11 組並回傳中文組數說明", async () => {
+  await withServer(async (base, _directory, app) => {
+    const create = (groupNames: string[]) => fetch(`${base}/api/teacher/activity`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ questionSetId: "seed-set", groupNames }),
+    });
+    const lowerBound = await create(["一組"]);
+    assert.equal(lowerBound.status, 400);
+    assert.deepEqual(await lowerBound.json(), { error: "活動組數須為 2～10 組。" });
+    assert.equal(app.manager.getActive(), undefined);
+
+    const minimum = await create(["一組", "二組"]);
+    assert.equal(minimum.status, 201);
+    const active = app.manager.getActive();
+    assert.equal(active?.groups.length, 2);
+
+    const upperBound = await create(Array.from({ length: 11 }, (_, index) => `第 ${index + 1} 組`));
+    assert.equal(upperBound.status, 400);
+    assert.deepEqual(await upperBound.json(), { error: "活動組數須為 2～10 組。" });
+    assert.equal(app.manager.getActive(), active);
+
+    const maximum = await create(Array.from({ length: 10 }, (_, index) => `第 ${index + 1} 組`));
+    assert.equal(maximum.status, 201);
+    assert.equal(app.manager.getActive()?.groups.length, 10);
+  });
+});
+
+test("認證老師 HTTP 活動畫面取得各組線上學生頁面數", async () => {
+  await withServer(async (base, _directory, app) => {
+    app.manager.create(fixtureSet(), { activityCode: "2468" });
+    const student = createClient(base, {
+      autoConnect: false, forceNew: true, reconnection: false, transports: ["websocket"],
+      auth: { role: "student", sessionToken: "team-a-session" },
+    });
+    try {
+      const studentView = new Promise<unknown>((resolve) => student.once("activity:student-view", resolve));
+      student.connect();
+      await new Promise<void>((resolve, reject) => {
+        student.once("connect", resolve);
+        student.once("connect_error", reject);
+      });
+      assert.equal(JSON.stringify(await studentView).includes("onlineStudentPages"), false);
+
+      const response = await fetch(`${base}/api/teacher/view`, { headers: teacherHeaders() });
+      assert.equal(response.status, 200);
+      const view = (await response.json() as { activity: { groups: { onlineStudentPages: number }[] } }).activity;
+      assert.deepEqual(view.groups.map(({ onlineStudentPages }) => onlineStudentPages), [1, 0, 0, 0]);
+    } finally {
+      student.disconnect();
+    }
   });
 });
 

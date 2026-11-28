@@ -6,7 +6,8 @@ export const RESULT_CSV_HEADERS = [
 ] as const;
 
 function escapeCsv(value: string | number): string {
-  const text = String(value);
+  const valueText = String(value);
+  const text = /^[=+\-@\t\r\n]/u.test(valueText) ? `'${valueText}` : valueText;
   return /[,"\r\n]/u.test(text) ? `"${text.replace(/"/gu, '""')}"` : text;
 }
 
@@ -19,10 +20,12 @@ export function createResultsCsv(activity: ActivityState): string {
   for (const question of activity.questionSet.questions) {
     const ranks = getQuestionRanks(activity, question.number);
     const submissions = [...(activity.submissions.get(question.number)?.values() ?? [])];
+    let hasExportableSubmission = false;
     for (const submission of submissions) {
       const rank = ranks.get(submission.groupId);
       const group = activity.groups.find(({ id }) => id === submission.groupId);
       if (rank === undefined || group === undefined) continue;
+      hasExportableSubmission = true;
       for (const subquestion of question.subquestions) {
         rows.push({
           question: question.number,
@@ -41,6 +44,14 @@ export function createResultsCsv(activity: ActivityState): string {
           ],
         });
       }
+    }
+    if (!hasExportableSubmission) {
+      rows.push({
+        question: question.number,
+        subquestion: 0,
+        rank: 0,
+        fields: [question.number, "", "", "", "", "", "", "", "沒有組別送出"],
+      });
     }
   }
   rows.sort((left, right) => left.question - right.question || left.subquestion - right.subquestion || left.rank - right.rank);
