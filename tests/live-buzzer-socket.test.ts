@@ -246,7 +246,7 @@ test("Socket student views expose only the current group's answers before and af
     assert.equal(serialized.includes("SECOND-SECRET-B"), false);
     assert.equal(serialized.includes("group-2"), false);
     assert.equal(serialized.includes("第 2 組"), false);
-    assert.equal(serialized.includes("rank"), false);
+  assert.doesNotMatch(serialized, /"(?:rank|originalRank|finalRank)"\s*:/u);
     assert.equal(serialized.includes("sequence"), false);
     assert.equal(serialized.includes("987654"), false);
   };
@@ -268,7 +268,7 @@ test("Socket student views expose only the current group's answers before and af
   const endedView = await endedViewPromise as {
     stage: string;
     questions: { subquestions: { answer?: string }[] }[];
-    results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null }[] | null;
+    results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null; explanation: string | null }[] | null;
   };
   assert.equal(endedView.stage, "ended");
   assert.deepEqual(endedView.results, [{
@@ -278,13 +278,50 @@ test("Socket student views expose only the current group's answers before and af
       { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
       { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
     ],
+    explanation: null,
   }]);
   assert.deepEqual(endedView.questions[0]?.subquestions.map(({ answer }) => answer), ["TEAM-A-ANSWER-1", "TEAM-A-ANSWER-2"]);
   assert.equal(JSON.stringify(endedView.questions).includes("SECRET-ANSWER-B"), false);
   assert.equal(JSON.stringify(endedView.questions).includes("group-2"), false);
-  assert.equal(JSON.stringify(endedView).includes("rank"), false);
+  assert.doesNotMatch(JSON.stringify(endedView), /"(?:rank|originalRank|finalRank)"\s*:/u);
   assert.equal(JSON.stringify(endedView).includes("sequence"), false);
   assert.equal(JSON.stringify(endedView).includes("987654"), false);
+});
+
+test("student Socket submission pushes a live teacher view in both ranking modes", async (context) => {
+  for (const rankingRule of ["speed", "cap"] as const) {
+    const manager = new ActivityManager();
+    const activity = manager.create(questionSet(), { activityCode: "2468", rankingRule });
+    transitionActivityStage(activity, "buzzing");
+    const harness = await startSocketHarness(manager);
+    const teacher = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+    const student = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+    context.after(async () => harness.close());
+    context.after(() => teacher.disconnect());
+    context.after(() => student.disconnect());
+    await Promise.all([connectAndReadTeacherView(teacher), connectAndReadStudentView(student)]);
+
+    const teacherUpdate = nextEvent<{ stage: string; questions: { groups: {
+      groupId: string; submitted: boolean; originalRank: number | null; finalRank: number | null;
+      successful: boolean; answers: { subquestionNumber: number; answer: string }[] | null;
+    }[] }[] }>(teacher, "activity:teacher-view");
+    assert.deepEqual(await student.emitWithAck("student:submit", {
+      questionNumber: 7, answers: { 1: `live-${rankingRule}-one`, 2: `live-${rankingRule}-two` },
+    }), { ok: true, questionNumber: 7 });
+    const update = await teacherUpdate;
+    assert.equal(update.stage, "buzzing");
+    assert.deepEqual(update.questions[0]?.groups[0], {
+      groupId: "group-1", groupName: "第 1 組", submitted: true,
+      sequence: 1, rank: 1, originalRank: 1, finalRank: 1, successful: true,
+      skipped: false, explanation: "", answers: [
+        { subquestionNumber: 1, answer: `live-${rankingRule}-one` },
+        { subquestionNumber: 2, answer: `live-${rankingRule}-two` },
+      ],
+    });
+
+    const studentState = await student.emitWithAck("student:get-state") as { view: unknown };
+    assert.doesNotMatch(JSON.stringify(studentState.view), /"(?:rank|originalRank|finalRank|skipped|successful)"\s*:/u);
+  }
 });
 
 test("two Socket clients submitting the same question near-simultaneously get server-ordered unique sequences", async (context) => {
@@ -346,6 +383,52 @@ test("authenticated teacher Socket actions update stage and description settings
   });
   assert.equal(activity.stage, "ended");
   assert.equal(activity.showQuestionDescriptions, true);
+});
+
+test("teacher Socket ranking-rule updates broadcast public rule details and reject after start/end", async (context) => {
+  const manager = new ActivityManager();
+  const activity = manager.create(questionSet(), { activityCode: "2468" });
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+  const teacher = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+  const groupOne = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+  const groupTwo = client(harness.url, { role: "student", sessionToken: "team-b-token" });
+  context.after(() => teacher.disconnect());
+  context.after(() => groupOne.disconnect());
+  context.after(() => groupTwo.disconnect());
+  await Promise.all([
+    connectAndReadTeacherView(teacher),
+    connectAndReadStudentView(groupOne),
+    connectAndReadStudentView(groupTwo),
+  ]);
+
+  const teacherUpdate = nextEvent<{ rankingRule: { name: string; explanation: string } }>(teacher, "activity:teacher-view");
+  const groupOneUpdate = nextEvent<{ rankingRule: { name: string; explanation: string } }>(groupOne, "activity:student-view");
+  const groupTwoUpdate = nextEvent<{ rankingRule: { name: string; explanation: string } }>(groupTwo, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:set-ranking-rule", "cap"), { ok: true, rankingRule: "cap" });
+  assert.deepEqual((await teacherUpdate).rankingRule, { name: "均分上限", explanation: "每組最多成功 1 題" });
+  for (const update of [await groupOneUpdate, await groupTwoUpdate]) {
+    assert.deepEqual(update.rankingRule, { name: "均分上限", explanation: "每組最多成功 1 題" });
+    const payload = JSON.stringify(update);
+    assert.doesNotMatch(payload, /"(?:rank|originalRank|finalRank|skipped|successful)"\s*:/u);
+  }
+  assert.equal(activity.rankingRule, "cap");
+
+  const oneStarted = nextEvent<{ stage: string }>(groupOne, "activity:student-view");
+  const twoStarted = nextEvent<{ stage: string }>(groupTwo, "activity:student-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:start"), { ok: true, stage: "buzzing" });
+  assert.equal((await oneStarted).stage, "buzzing");
+  assert.equal((await twoStarted).stage, "buzzing");
+  assert.deepEqual(await teacher.emitWithAck("teacher:set-ranking-rule", "speed"), {
+    ok: false, reason: "ranking-rule-locked", message: "搶答開始後不能更改排名規則",
+  });
+  assert.equal(activity.rankingRule, "cap");
+
+  assert.deepEqual(await teacher.emitWithAck("teacher:end"), { ok: true, stage: "ended" });
+  assert.deepEqual(await teacher.emitWithAck("teacher:set-ranking-rule", "speed"), {
+    ok: false, reason: "ranking-rule-locked", message: "搶答開始後不能更改排名規則",
+  });
+  assert.equal(activity.rankingRule, "cap");
 });
 
 test("teacher stage and description broadcasts reach students in every group", async (context) => {

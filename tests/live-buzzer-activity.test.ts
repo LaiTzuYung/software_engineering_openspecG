@@ -38,6 +38,7 @@ test("activity starts empty and creates a single in-memory activity with default
   assert.equal(manager.getActive(), activity);
   assert.equal(activity.activityCode, "1234");
   assert.equal(activity.stage, "preparing");
+  assert.equal(activity.rankingRule, "speed");
   assert.equal(activity.showQuestionDescriptions, false);
   assert.equal(activity.nextSubmissionSequence, 1);
   assert.deepEqual(activity.groups.map(({ name }) => name), ["第 1 組", "第 2 組", "第 3 組", "第 4 組"]);
@@ -46,6 +47,29 @@ test("activity starts empty and creates a single in-memory activity with default
   assert.notEqual(activity.questionSet.questions, source.questions);
 
   assert.equal(new ActivityManager().getActive(), undefined);
+});
+
+test("activity accepts a ranking rule at creation and only changes it while preparing", () => {
+  const manager = new ActivityManager();
+  const activity = manager.create(questionSet(), { activityCode: "1234", rankingRule: "cap" });
+  assert.equal(activity.rankingRule, "cap");
+
+  assert.deepEqual(manager.setRankingRule("speed"), { ok: true, rankingRule: "speed" });
+  assert.equal(activity.rankingRule, "speed");
+  assert.deepEqual(manager.transition("buzzing"), { ok: true, stage: "buzzing" });
+  assert.deepEqual(manager.setRankingRule("cap"), {
+    ok: false,
+    reason: "ranking-rule-locked",
+    message: "搶答開始後不能更改排名規則",
+  });
+  assert.equal(activity.rankingRule, "speed");
+  assert.deepEqual(manager.transition("ended"), { ok: true, stage: "ended" });
+  assert.deepEqual(manager.setRankingRule("cap"), {
+    ok: false,
+    reason: "ranking-rule-locked",
+    message: "搶答開始後不能更改排名規則",
+  });
+  assert.equal(activity.rankingRule, "speed");
 });
 
 test("activity stage transitions allow only preparing to buzzing to ended", () => {

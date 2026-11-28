@@ -174,6 +174,43 @@ test("題組只寫標籤右側 answerCell；題目無成功組時不產生任何
   }
 });
 
+test("均分上限 2-15 範例的回寫預覽與確認共用遞補組答案", async () => {
+  const activity = createActivityState(importedSet(), {
+    activityCode: "1234",
+    rankingRule: "cap",
+    groupNames: ["第 1 組", "第 2 組"],
+  });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-1", 2, { 1: "第 1 組題組答案一", 2: "第 1 組題組答案二" });
+  submitAnswers(activity, "group-1", 1, { 1: "第 1 組被跳過答案" });
+  submitAnswers(activity, "group-2", 1, { 1: "第 2 組遞補答案" });
+  const answers = successfulAnswersForExport(activity);
+  assert.deepEqual(answers, [
+    { questionNumber: 1, subquestionNumber: 1, answer: "第 2 組遞補答案" },
+    { questionNumber: 2, subquestionNumber: 1, answer: "第 1 組題組答案一" },
+    { questionNumber: 2, subquestionNumber: 2, answer: "第 1 組題組答案二" },
+  ]);
+
+  const service = new SpreadsheetExportPreviewService(async () => sheet());
+  const preview = await service.create(importedSet(), answers, "1234");
+  assert.deepEqual(preview.targets.map(({ cell, answer }) => [cell.address, answer]), [
+    ["C2", "第 2 組遞補答案"],
+    ["D3", "第 1 組題組答案一"],
+    ["D4", "第 1 組題組答案二"],
+  ]);
+  const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "cap-writeback-test-"));
+  try {
+    const written: string[] = [];
+    await service.confirmAndWrite(preview.id, "1234", async (_id, ranges) => {
+      written.push(...ranges.map(({ values }) => String(values[0]?.[0] ?? "")));
+      return ranges.length;
+    }, backupDirectory);
+    assert.deepEqual(written, answers.map(({ answer }) => answer));
+  } finally {
+    await rm(backupDirectory, { recursive: true, force: true });
+  }
+});
+
 test("備份每次獨立保存來源、座標、時間、狀態與型別；還原只恢復相符格並忽略失敗備份", async () => {
   const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "export-restore-test-"));
   let current: GridSheet = {

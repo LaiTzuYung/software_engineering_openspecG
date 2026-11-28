@@ -1,6 +1,8 @@
 import { randomInt } from "node:crypto";
 import type { GuidedNotesQuestionSet } from "../guided-notes/import-service.ts";
 
+export type RankingRule = "speed" | "cap";
+
 export type ActivityStage = "preparing" | "buzzing" | "ended";
 
 export interface ActivityGroup {
@@ -23,6 +25,7 @@ export interface ActivityState {
   readonly questionSet: GuidedNotesQuestionSet;
   readonly groups: readonly ActivityGroup[];
   stage: ActivityStage;
+  rankingRule: RankingRule;
   showQuestionDescriptions: boolean;
   nextSubmissionSequence: number;
   readonly submissions: Map<number, Map<string, AcceptedSubmission>>;
@@ -31,6 +34,7 @@ export interface ActivityState {
 export interface CreateActivityOptions {
   readonly activityCode?: string;
   readonly groupNames?: readonly string[];
+  readonly rankingRule?: RankingRule;
 }
 
 export const DEFAULT_GROUP_NAMES = ["第 1 組", "第 2 組", "第 3 組", "第 4 組"] as const;
@@ -53,6 +57,7 @@ export function createActivityState(
     questionSet: structuredClone(questionSet),
     groups: groupNames.map((name, index) => ({ id: `group-${index + 1}`, name })),
     stage: "preparing",
+    rankingRule: options.rankingRule ?? "speed",
     showQuestionDescriptions: false,
     nextSubmissionSequence: 1,
     submissions: new Map(),
@@ -62,6 +67,27 @@ export function createActivityState(
 export type StageTransitionResult =
   | { readonly ok: true; readonly stage: ActivityStage }
   | { readonly ok: false; readonly reason: "invalid-transition" };
+
+export type RankingRuleUpdateResult =
+  | { readonly ok: true; readonly rankingRule: RankingRule }
+  | { readonly ok: false; readonly reason: "activity-unavailable" }
+  | { readonly ok: false; readonly reason: "ranking-rule-locked"; readonly message: string };
+
+/** Changes the ranking rule only before the activity starts. */
+export function updateActivityRankingRule(
+  activity: ActivityState,
+  rankingRule: RankingRule,
+): RankingRuleUpdateResult {
+  if (activity.stage !== "preparing") {
+    return {
+      ok: false,
+      reason: "ranking-rule-locked",
+      message: "搶答開始後不能更改排名規則",
+    };
+  }
+  activity.rankingRule = rankingRule;
+  return { ok: true, rankingRule };
+}
 
 /** Applies only the allowed forward transitions and leaves state untouched on rejection. */
 export function transitionActivityStage(
@@ -94,5 +120,10 @@ export class ActivityManager {
   transition(nextStage: ActivityStage): StageTransitionResult {
     if (this.current === undefined) return { ok: false, reason: "invalid-transition" };
     return transitionActivityStage(this.current, nextStage);
+  }
+
+  setRankingRule(rankingRule: RankingRule): RankingRuleUpdateResult {
+    if (this.current === undefined) return { ok: false, reason: "activity-unavailable" };
+    return updateActivityRankingRule(this.current, rankingRule);
   }
 }

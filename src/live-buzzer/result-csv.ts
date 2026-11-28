@@ -1,5 +1,5 @@
 import type { ActivityState } from "./model.ts";
-import { getQuestionRanks, getQuestionResults } from "./submissions.ts";
+import { calculateRankingResults } from "./submissions.ts";
 
 export const RESULT_CSV_HEADERS = [
   "題號", "小題", "組別", "答案", "原始順位", "最終順位", "是否成功", "送出時間", "說明",
@@ -20,34 +20,32 @@ function escapeCsv(value: string | number): string {
 
 /** Builds one CSV row per accepted submission subquestion, reusing question-local ranks. */
 export function createResultsCsv(activity: ActivityState): string {
-  const successfulGroups = new Map(
-    getQuestionResults(activity).map(({ questionNumber, successfulGroup }) => [questionNumber, successfulGroup?.id]),
-  );
+  const ranking = calculateRankingResults(activity);
+  const rankedBySequence = new Map(ranking.submissions.map((result) => [result.submission.sequence, result]));
   const rows: { question: number; subquestion: number; rank: number; fields: (string | number)[] }[] = [];
   for (const question of activity.questionSet.questions) {
-    const ranks = getQuestionRanks(activity, question.number);
     const submissions = [...(activity.submissions.get(question.number)?.values() ?? [])];
     let hasExportableSubmission = false;
     for (const submission of submissions) {
-      const rank = ranks.get(submission.groupId);
+      const result = rankedBySequence.get(submission.sequence);
       const group = activity.groups.find(({ id }) => id === submission.groupId);
-      if (rank === undefined || group === undefined) continue;
+      if (result === undefined || group === undefined) continue;
       hasExportableSubmission = true;
       for (const subquestion of question.subquestions) {
         rows.push({
           question: question.number,
           subquestion: subquestion.number,
-          rank,
+          rank: result.originalRank,
           fields: [
             question.number,
             subquestion.number,
             group.name,
             submission.answers[subquestion.number] ?? "",
-            rank,
-            rank,
-            successfulGroups.get(question.number) === submission.groupId ? "是" : "否",
+            result.originalRank,
+            result.finalRank ?? "",
+            result.successful ? "是" : "否",
             formatCsvSubmittedAt(submission.submittedAt),
-            "",
+            result.explanation,
           ],
         });
       }
