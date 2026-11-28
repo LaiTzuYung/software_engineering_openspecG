@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createActivityState, transitionActivityStage } from "../src/live-buzzer/model.ts";
 import { submitAnswers } from "../src/live-buzzer/submissions.ts";
-import { createStudentView, createTeacherView } from "../src/live-buzzer/views.ts";
+import { createScreenView, createStudentView, createTeacherView } from "../src/live-buzzer/views.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 
 function questionSet(): GuidedNotesQuestionSet {
@@ -91,11 +91,11 @@ test("ended student view preserves successful-group results while own answers re
   for (const stage of ["buzzing", "ended"] as const) {
     if (stage === "ended") transitionActivityStage(activity, "ended");
     const view = createStudentView(activity, "group-1");
-    assert.deepEqual(view?.questions[0]?.subquestions, [
-      { number: 1, submitted: true, answer: "TEAM-A-ANSWER-1" },
-      { number: 2, submitted: true, answer: "TEAM-A-ANSWER-2" },
-    ]);
     if (stage === "buzzing") {
+      assert.deepEqual(view?.questions[0]?.subquestions, [
+        { number: 1, submitted: true, answer: "TEAM-A-ANSWER-1" },
+        { number: 2, submitted: true, answer: "TEAM-A-ANSWER-2" },
+      ]);
       assert.equal(view?.results, null);
       const payload = JSON.stringify(view);
       assert.equal(payload.includes("SECRET-ANSWER-B"), false);
@@ -105,6 +105,10 @@ test("ended student view preserves successful-group results while own answers re
       assert.doesNotMatch(payload, /"(?:rank|originalRank|finalRank)"\s*:/u);
       assert.equal(payload.includes("sequence"), false);
     } else {
+      assert.deepEqual(view?.questions[0]?.subquestions, [
+        { number: 1, submitted: true, answer: "TEAM-A-ANSWER-1" },
+        { number: 2, submitted: true, answer: "TEAM-A-ANSWER-2" },
+      ]);
       assert.deepEqual(view?.results, [{
         questionNumber: 7,
         successfulGroup: { id: "group-2", name: "第 2 組" },
@@ -112,6 +116,7 @@ test("ended student view preserves successful-group results while own answers re
           { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
           { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
         ],
+        otherSubmissions: [{ group: { id: "group-1", name: "第 1 組" }, originalRank: 2, skipped: false }],
       explanation: null,
       }]);
     }
@@ -127,6 +132,59 @@ test("ended student result includes the no-success explanation for a skipped-onl
 
   const view = createStudentView(activity, "group-1");
   assert.equal(view?.results?.[1]?.explanation, "唯一送出的第 1 組已達上限 1 題");
+});
+
+test("ended student result with no submissions has no winner, answers, or other submissions", () => {
+  const activity = createActivityState(questionSet(), { activityCode: "2468" });
+  transitionActivityStage(activity, "buzzing");
+  transitionActivityStage(activity, "ended");
+  const view = createStudentView(activity, "group-1");
+  assert.deepEqual(view?.results, [{
+    questionNumber: 7, successfulGroup: null, answers: null, explanation: null, otherSubmissions: [],
+  }]);
+});
+
+test("ended student results show original ranks and skipped status without other answers", () => {
+  const activity = createActivityState(twoQuestionSet(), { activityCode: "2468", rankingRule: "cap" });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-1", 7, { 1: "WINNER-A", 2: "WINNER-B" });
+  submitAnswers(activity, "group-2", 7, { 1: "OTHER-A", 2: "OTHER-B" });
+  submitAnswers(activity, "group-1", 8, { 1: "SKIP-A", 2: "SKIP-B" });
+  submitAnswers(activity, "group-2", 8, { 1: "WINNER-C", 2: "WINNER-D" });
+  transitionActivityStage(activity, "ended");
+  const view = createStudentView(activity, "group-3");
+  assert.deepEqual(view?.results?.[0]?.otherSubmissions, [{ group: { id: "group-2", name: "第 2 組" }, originalRank: 2, skipped: false }]);
+  assert.deepEqual(view?.results?.[1]?.otherSubmissions, [{ group: { id: "group-1", name: "第 1 組" }, originalRank: 1, skipped: true }]);
+  for (const entry of view?.results?.flatMap(({ otherSubmissions }) => otherSubmissions) ?? []) {
+    assert.deepEqual(Object.keys(entry).sort(), ["group", "originalRank", "skipped"]);
+    assert.deepEqual(Object.keys(entry.group).sort(), ["id", "name"]);
+  }
+  assert.equal(JSON.stringify(view?.results).includes("OTHER-A"), false);
+  assert.equal(JSON.stringify(view?.results).includes("SKIP-A"), false);
+});
+
+test("ended non-winning student can still see own answers but not another non-winning group's answers", () => {
+  const activity = createActivityState(questionSet(), { activityCode: "2468" });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-2", 7, { 1: "WINNER-ANSWER-1", 2: "WINNER-ANSWER-2" });
+  submitAnswers(activity, "group-1", 7, { 1: "OWN-LOSER-ANSWER-1", 2: "OWN-LOSER-ANSWER-2" });
+  submitAnswers(activity, "group-3", 7, { 1: "OTHER-LOSER-ANSWER-1", 2: "OTHER-LOSER-ANSWER-2" });
+  transitionActivityStage(activity, "ended");
+
+  const view = createStudentView(activity, "group-1");
+  assert.deepEqual(view?.questions[0]?.subquestions, [
+    { number: 1, submitted: true, answer: "OWN-LOSER-ANSWER-1" },
+    { number: 2, submitted: true, answer: "OWN-LOSER-ANSWER-2" },
+  ]);
+  assert.deepEqual(view?.results?.[0]?.otherSubmissions, [
+    { group: { id: "group-1", name: "第 1 組" }, originalRank: 2, skipped: false },
+    { group: { id: "group-3", name: "第 3 組" }, originalRank: 3, skipped: false },
+  ]);
+  const serialized = JSON.stringify(view);
+  assert.equal(serialized.includes("OWN-LOSER-ANSWER-1"), true);
+  assert.equal(serialized.includes("OWN-LOSER-ANSWER-2"), true);
+  assert.equal(serialized.includes("OTHER-LOSER-ANSWER-1"), false);
+  assert.equal(serialized.includes("OTHER-LOSER-ANSWER-2"), false);
 });
 
 test("teacher view exposes central ranking fields and question explanation for rendering", () => {
@@ -146,6 +204,40 @@ test("teacher view exposes central ranking fields and question explanation for r
     [null, null, false, false, ""],
   ]);
   assert.equal(view.questions[1]?.explanation, null);
+});
+
+test("screen view has a stage-specific allowlist and ended results expose only winner answers and other original ranks", () => {
+  const activity = createActivityState(twoQuestionSet(), { activityCode: "2468", rankingRule: "cap" });
+  const preparing = createScreenView(activity);
+  assert.equal(preparing.stage, "preparing");
+  assert.equal(preparing.groupCount, 4);
+  assert.equal(preparing.activityCode, "2468");
+
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-1", 7, { 1: "WINNER-A1", 2: "WINNER-A2" });
+  submitAnswers(activity, "group-2", 7, { 1: "LOSER-SECRET-B1", 2: "LOSER-SECRET-B2" });
+  const buzzing = createScreenView(activity);
+  const buzzingPayload = JSON.stringify(buzzing);
+  assert.deepEqual(buzzing.questions.map(({ submittedCount, totalGroups }) => [submittedCount, totalGroups]), [[2, 4], [0, 4]]);
+  for (const forbidden of ["WINNER-A1", "LOSER-SECRET", "group-1", "第 1 組", "originalRank", "finalRank", "position", "finalPosition", '"rank"', "successful", "skipped", "sequence", "answers"]) {
+    assert.equal(buzzingPayload.includes(forbidden), false, `搶答中不可包含 ${forbidden}`);
+  }
+
+  submitAnswers(activity, "group-3", 8, { 1: "SKIPPED-C1", 2: "SKIPPED-C2" });
+  submitAnswers(activity, "group-1", 8, { 1: "WINNER-C1", 2: "WINNER-C2" });
+  transitionActivityStage(activity, "ended");
+  const ended = createScreenView(activity);
+  assert.deepEqual(ended.questions[0]?.results, {
+    successfulGroup: { id: "group-1", name: "第 1 組" },
+    answers: [{ subquestionNumber: 1, answer: "WINNER-A1" }, { subquestionNumber: 2, answer: "WINNER-A2" }],
+    others: [{ groupName: "第 2 組", originalRank: 2, skipped: false }],
+    explanation: null,
+  });
+  assert.deepEqual(ended.questions[1]?.results?.others, [{ groupName: "第 1 組", originalRank: 2, skipped: true }]);
+  assert.deepEqual(ended.questions[1]?.results?.successfulGroup, { id: "group-3", name: "第 3 組" });
+  assert.deepEqual(ended.questions[1]?.results?.answers, [{ subquestionNumber: 1, answer: "SKIPPED-C1" }, { subquestionNumber: 2, answer: "SKIPPED-C2" }]);
+  assert.equal(JSON.stringify(ended.questions[0]?.results).includes("LOSER-SECRET"), false);
+  assert.equal(JSON.stringify(ended.questions[1]?.results).includes("group-1"), false);
 });
 
 test("buzzing teacher view has live ranks and outcomes in both pure-speed and cap modes", () => {

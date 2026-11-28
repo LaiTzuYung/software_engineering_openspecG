@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { studentPage, teacherLoginPage, teacherPage } from "../src/live-buzzer/pages.ts";
+import { screenPage, studentPage, teacherLoginPage, teacherPage } from "../src/live-buzzer/pages.ts";
 
 function createTeacherPageHarness() {
   const elements = new Map<string, any>();
@@ -93,6 +93,28 @@ test("teacher login stores the PIN and the teacher page connects on load, handle
 
   const afterReload = createTeacherPageHarness();
   assert.equal(afterReload.ioCalls.length, 1, "重新載入老師頁時會依 sessionStorage 重新建立 Socket 連線");
+});
+
+test("screen page connects as a read-only screen and renders all three stages with projection styling", () => {
+  assert.match(screenPage, /目前沒有進行中的活動/u);
+  assert.match(screenPage, /等待老師開始/u);
+  assert.match(screenPage, /已送出 /u);
+  assert.match(screenPage, /原始順位/u);
+  assert.match(screenPage, /沒有組別送出/u);
+  assert.match(screenPage, /role:'screen'/u);
+  assert.match(screenPage, /activity:screen-view/u);
+  assert.match(screenPage, /font:30px/u);
+  const script = screenPage.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
+  assert.ok(script);
+  assert.doesNotThrow(() => new Function(script));
+  assert.match(studentPage, /otherSubmissions/u);
+  assert.match(studentPage, /已達上限（跳過）/u);
+  const resultRendering = studentPage.split("if(view.stage==='ended'){ ")[1]?.split("if(view.stage==='buzzing')")[0]
+    ?? studentPage.split("if(view.stage==='ended'){\n")[1]?.split("if(view.stage==='buzzing')")[0];
+  assert.ok(resultRendering);
+  assert.match(resultRendering, /result\.answers/u);
+  assert.match(resultRendering, /submitted\.group\.name/u);
+  assert.doesNotMatch(resultRendering, /submitted\.answer/u);
 });
 
 test("teacher page renders buzzing submissions even when an update omits the ranking descriptor", () => {

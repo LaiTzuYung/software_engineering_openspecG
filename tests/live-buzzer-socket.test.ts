@@ -268,7 +268,7 @@ test("Socket student views expose only the current group's answers before and af
   const endedView = await endedViewPromise as {
     stage: string;
     questions: { subquestions: { answer?: string }[] }[];
-    results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null; explanation: string | null }[] | null;
+    results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null; otherSubmissions: { group: { id: string; name: string }; originalRank: number; skipped: boolean }[]; explanation: string | null }[] | null;
   };
   assert.equal(endedView.stage, "ended");
   assert.deepEqual(endedView.results, [{
@@ -278,12 +278,13 @@ test("Socket student views expose only the current group's answers before and af
       { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
       { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
     ],
+    otherSubmissions: [{ group: { id: "group-1", name: "第 1 組" }, originalRank: 2, skipped: false }],
     explanation: null,
   }]);
   assert.deepEqual(endedView.questions[0]?.subquestions.map(({ answer }) => answer), ["TEAM-A-ANSWER-1", "TEAM-A-ANSWER-2"]);
   assert.equal(JSON.stringify(endedView.questions).includes("SECRET-ANSWER-B"), false);
   assert.equal(JSON.stringify(endedView.questions).includes("group-2"), false);
-  assert.doesNotMatch(JSON.stringify(endedView), /"(?:rank|originalRank|finalRank)"\s*:/u);
+  assert.doesNotMatch(JSON.stringify(endedView), /"finalRank"\s*:/u);
   assert.equal(JSON.stringify(endedView).includes("sequence"), false);
   assert.equal(JSON.stringify(endedView).includes("987654"), false);
 });
@@ -574,18 +575,26 @@ test("submission updates only the submitting group while other groups receive no
   const submitter = client(harness.url, { role: "student", sessionToken: "team-a-token" });
   const sameGroupPeer = client(harness.url, { role: "student", sessionToken: "team-a-token" });
   const otherGroup = client(harness.url, { role: "student", sessionToken: "team-b-token" });
+  const screen = client(harness.url, { role: "screen" });
   context.after(() => submitter.disconnect());
   context.after(() => sameGroupPeer.disconnect());
   context.after(() => otherGroup.disconnect());
+  context.after(() => screen.disconnect());
   await Promise.all([
     connectAndReadStudentView(submitter),
     connectAndReadStudentView(sameGroupPeer),
     connectAndReadStudentView(otherGroup),
+    new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("逾時等待大螢幕初始視圖")), 3_000);
+      screen.once("activity:screen-view", () => { clearTimeout(timer); resolve(); });
+      screen.connect();
+    }),
   ]);
 
   const submitterUpdate = nextEvent<{ questions: { subquestions: { submitted: boolean }[] }[] }>(submitter, "activity:student-view");
   const peerUpdate = nextEvent<{ questions: { subquestions: { submitted: boolean }[] }[] }>(sameGroupPeer, "activity:student-view");
   const noOtherGroupUpdate = assertNoEvent(otherGroup, "activity:student-view");
+  const screenUpdate = nextEvent<{ questions: { submittedCount: number }[] }>(screen, "activity:screen-view");
   assert.deepEqual(await submitter.emitWithAck("student:submit", {
     questionNumber: 7, answers: { 1: "team one", 2: "team two" },
   }), { ok: true, questionNumber: 7 });
@@ -594,6 +603,57 @@ test("submission updates only the submitting group while other groups receive no
     assert.equal(update.questions[0]?.subquestions.every(({ submitted }) => submitted), true);
   }
   await noOtherGroupUpdate;
+  assert.equal((await screenUpdate).questions[0]?.submittedCount, 1);
+});
+
+test("screen socket is read-only and buzzing payloads omit all submission details", async (context) => {
+  const manager = new ActivityManager();
+  const activity = manager.create(questionSet(), { activityCode: "2468" });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-1", 7, { 1: "SCREEN-SECRET", 2: "OTHER-SECRET" });
+  const harness = await startSocketHarness(manager);
+  context.after(async () => harness.close());
+  const screen = client(harness.url, { role: "screen" });
+  context.after(() => screen.disconnect());
+  const statePromise = nextEvent<{ stage: string }>(screen, "activity:screen-view");
+  screen.connect();
+  const initial = await statePromise;
+  const payload = JSON.stringify(initial);
+  assert.equal(initial.stage, "buzzing");
+  for (const forbidden of ["SCREEN-SECRET", "OTHER-SECRET", "group-1", "第 1 組", "originalRank", "finalRank", '"rank"', '"position"', '"finalPosition"', "successful", "answers", "sequence"]) {
+    assert.equal(payload.includes(forbidden), false, `大螢幕搶答 payload 不得包含 ${forbidden}`);
+  }
+  const queried = await screen.emitWithAck("screen:get-state") as { ok: boolean; activity: { stage: string } };
+  assert.equal(queried.ok, true);
+  assert.equal(queried.activity.stage, "buzzing");
+  const reconnectView = nextEvent<{ stage: string }>(screen, "activity:screen-view");
+  screen.disconnect();
+  screen.connect();
+  assert.equal((await reconnectView).stage, "buzzing");
+  const actions: [string, unknown?][] = [
+    ["teacher:start"], ["teacher:end"], ["teacher:set-ranking-rule", "cap"],
+    ["teacher:set-question-descriptions", true], ["student:submit", { questionNumber: 7, answers: { 1: "x", 2: "y" } }],
+  ];
+  for (const [event, argument] of actions) {
+    const result = argument === undefined
+      ? await screen.emitWithAck(event)
+      : await screen.emitWithAck(event, argument);
+    assert.deepEqual(result, { ok: false, reason: "unauthorized" }, `${event} 應遭拒`);
+  }
+  assert.equal(activity.stage, "buzzing");
+  assert.equal(activity.submissions.get(7)?.size, 1);
+
+  const teacher = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+  context.after(() => teacher.disconnect());
+  await connectAndReadTeacherView(teacher);
+  const endedUpdate = nextEvent<{ stage: string; questions: { results?: { answers: { answer: string }[] | null } }[] }>(screen, "activity:screen-view");
+  assert.deepEqual(await teacher.emitWithAck("teacher:end"), { ok: true, stage: "ended" });
+  const ended = await endedUpdate;
+  assert.equal(ended.stage, "ended");
+  assert.deepEqual(ended.questions[0]?.results?.answers, [
+    { subquestionNumber: 1, answer: "SCREEN-SECRET" },
+    { subquestionNumber: 2, answer: "OTHER-SECRET" },
+  ]);
 });
 
 test("leaving one student Socket tab does not clear the group's accepted answer or affect another tab", async (context) => {
