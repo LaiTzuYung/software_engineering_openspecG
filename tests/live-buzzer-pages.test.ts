@@ -1,6 +1,42 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { studentPage, teacherPage } from "../src/live-buzzer/pages.ts";
+import { studentPage, teacherLoginPage, teacherPage } from "../src/live-buzzer/pages.ts";
+
+function createTeacherPageHarness() {
+  const elements = new Map<string, any>();
+  const ioCalls: unknown[] = [];
+  const socketHandlers = new Map<string, (payload: unknown) => void>();
+  const document = {
+    querySelector(selector: string) {
+      let element = elements.get(selector);
+      if (element === undefined) {
+        element = {
+          children: [], textContent: "", className: "", value: "", dataset: {}, selectedOptions: [],
+          append(...children: unknown[]) { this.children.push(...children); },
+          replaceChildren(...children: unknown[]) { this.children = [...children]; },
+        };
+        elements.set(selector, element);
+      }
+      return element;
+    },
+    createElement(tag: string) {
+      return { tag, children: [] as unknown[], textContent: "", className: "", append(...children: unknown[]) { this.children.push(...children); } };
+    },
+  };
+  const script = teacherPage.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
+  assert.ok(script);
+  const socket = {
+    on(event: string, handler: (payload: unknown) => void) { socketHandlers.set(event, handler); return this; },
+  };
+  const runtime = new Function("document", "io", "sessionStorage", "fetch", "Option", `${script};return {show};`)(
+    document,
+    (options: unknown) => { ioCalls.push(options); return socket; },
+    { getItem() { return "test-pin"; } },
+    () => new Promise(() => {}),
+    class Option {},
+  ) as { show: (view: unknown) => void };
+  return { elements, ioCalls, socketHandlers, show: runtime.show };
+}
 
 test("teacher and student pages render ranking controls, results and no-success reasons", () => {
   assert.match(teacherPage, /id="create"[^>]*>建立活動/u);
@@ -13,6 +49,11 @@ test("teacher and student pages render ranking controls, results and no-success 
   assert.match(studentPage, /排名規則：/u);
   assert.match(studentPage, /result\.explanation/u);
   assert.match(studentPage, /view\.stage==='ended'/u);
+  assert.match(studentPage, /function leaveActivity\(\)/u);
+  assert.match(studentPage, /leaveButton\.addEventListener\('click',leaveActivity\)/u);
+  assert.match(studentPage, /drafts\[questionNumber\]=\{\}/u);
+  assert.match(studentPage, /input\.value=drafts\[question\.number\]\?\./u);
+  assert.match(studentPage, /socket\.emitWithAck\('student:submit'/u);
 
   for (const page of [teacherPage, studentPage]) {
     const script = page.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
@@ -22,4 +63,48 @@ test("teacher and student pages render ranking controls, results and no-success 
   const buzzingRender = studentPage.split("if(view.stage==='buzzing'){")[1]?.split("\n  }\n}\nfunction connectStudent")[0];
   assert.ok(buzzingRender);
   assert.doesNotMatch(buzzingRender, /順位|已達上限|跳過|遞補|成功組|不成功/u);
+});
+
+test("teacher login stores the PIN and the teacher page connects on load, handles views, and enables reconnect", () => {
+  assert.match(teacherLoginPage, /sessionStorage\.setItem\('teacherPin',pin\);location\.href='\/teacher'/u);
+  assert.match(teacherPage, /<script src="\/socket\.io\/socket\.io\.js"><\/script><script>/u);
+  const firstLoad = createTeacherPageHarness();
+  assert.deepEqual(firstLoad.ioCalls, [{ auth: { role: "teacher", pin: "test-pin" }, reconnection: true }]);
+  assert.equal(typeof firstLoad.socketHandlers.get("activity:teacher-view"), "function");
+  assert.equal(typeof firstLoad.socketHandlers.get("connect_error"), "function");
+  for (const [id, event] of [
+    ["#create", "onclick"], ["#start", "onclick"], ["#end", "onclick"],
+    ["#descriptions", "onchange"], ["#preview", "onclick"], ["#confirm", "onclick"],
+    ["#export-preview-button", "onclick"], ["#export-confirm-button", "onclick"],
+    ["#export-restore-button", "onclick"], ["#export-csv-button", "onclick"],
+  ]) assert.equal(typeof firstLoad.elements.get(id)?.[event], "function", `${id} ${event} should remain registered`);
+  assert.match(teacherPage, /refreshSets\(\)\.then\(\(\)=>api\('\/api\/teacher\/view'\)\)\.then\(show\)/u);
+
+  const afterReload = createTeacherPageHarness();
+  assert.equal(afterReload.ioCalls.length, 1, "重新載入老師頁時會依 sessionStorage 重新建立 Socket 連線");
+});
+
+test("teacher page renders buzzing submissions even when an update omits the ranking descriptor", () => {
+  const harness = createTeacherPageHarness();
+  harness.socketHandlers.get("activity:teacher-view")?.({
+    activityCode: "2468", stage: "buzzing", canWriteSpreadsheet: false, questionSetSource: "legacy",
+    questionDescriptionsVisible: false,
+    groups: [{ id: "group-1", name: "第 1 組", onlineStudentPages: 1 }],
+    questions: [{
+      number: 7,
+      explanation: null,
+      subquestions: [{ number: 1 }],
+      groups: [{
+        groupId: "group-1", groupName: "第 1 組", submitted: true, sequence: 1,
+        rank: 1, originalRank: 1, finalRank: 1, successful: true, skipped: false,
+        explanation: "", answers: [{ subquestionNumber: 1, answer: "即時答案" }],
+      }],
+    }],
+  });
+
+  const serialize = (element: any): string => `${element.textContent}${element.children.map(serialize).join("")}`;
+  assert.match(serialize(harness.elements.get("#view")), /已送出/u);
+  assert.match(serialize(harness.elements.get("#view")), /原始順位：1/u);
+  assert.match(serialize(harness.elements.get("#view")), /答案：即時答案/u);
+  assert.match(serialize(harness.elements.get("#view")), /本題成功組/u);
 });

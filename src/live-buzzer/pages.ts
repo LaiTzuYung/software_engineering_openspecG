@@ -193,9 +193,11 @@ function show(response){
   stage.className='stage-badge stage-'+data.stage;
   document.querySelector('#descriptions').checked=data.questionDescriptionsVisible;
   const ruleControl=document.querySelector('#activity-ranking-rule-control'),ruleReadonly=document.querySelector('#activity-ranking-rule-readonly'),ruleSelect=document.querySelector('#activity-ranking-rule');
-  ruleSelect.value=data.rankingRule.name==='均分上限'?'cap':'speed';
+  if(data.rankingRule){
+    ruleSelect.value=data.rankingRule.name==='均分上限'?'cap':'speed';
+    ruleReadonly.textContent=rankingRuleText(data.rankingRule);
+  }
   ruleControl.hidden=data.stage!=='preparing';ruleReadonly.hidden=data.stage==='preparing';
-  ruleReadonly.textContent=rankingRuleText(data.rankingRule);
   ruleSelect.disabled=data.stage!=='preparing';
   renderTable(data);updateExportControls(data);
 }
@@ -205,7 +207,11 @@ function updateCreateRankingCap(){
   const option=document.querySelector('#sets').selectedOptions[0],questionCount=Number(option?.dataset.totalQuestionCount||0);
   const names=document.querySelector('#groups').value.split(/\\r?\\n/).map(value=>value.trim()).filter(Boolean),groupCount=names.length||4;
   capText.textContent='每組最多成功 '+Math.ceil(questionCount/groupCount)+' 題';capText.hidden=false;
-}document.querySelector('#create-ranking-rule').onchange=updateCreateRankingCap;
+}
+const socket=io({auth:{role:'teacher',pin:sessionStorage.getItem('teacherPin')||''},reconnection:true});
+socket.on('activity:teacher-view',show);
+socket.on('connect_error',()=>message.textContent='即時連線失敗，請重新登入。');
+document.querySelector('#create-ranking-rule').onchange=updateCreateRankingCap;
 document.querySelector('#sets').onchange=updateCreateRankingCap;
 document.querySelector('#groups').oninput=updateCreateRankingCap;
 document.querySelector('#activity-ranking-rule').onchange=async event=>{try{show(await api('/api/teacher/ranking-rule',{rankingRule:event.target.value}))}catch(error){message.textContent=error.message;api('/api/teacher/view').then(show).catch(()=>{})}};

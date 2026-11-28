@@ -148,6 +148,39 @@ test("teacher view exposes central ranking fields and question explanation for r
   assert.equal(view.questions[1]?.explanation, null);
 });
 
+test("buzzing teacher view has live ranks and outcomes in both pure-speed and cap modes", () => {
+  for (const rankingRule of ["speed", "cap"] as const) {
+    const activity = createActivityState(twoQuestionSet(), {
+      activityCode: "2468", rankingRule, groupNames: ["第 1 組", "第 2 組"],
+    });
+    transitionActivityStage(activity, "buzzing");
+    submitAnswers(activity, "group-1", 7, { 1: "A1", 2: "A2" });
+
+    if (rankingRule === "speed") {
+      submitAnswers(activity, "group-2", 7, { 1: "B1", 2: "B2" });
+      const view = createTeacherView(activity);
+      assert.equal(view.stage, "buzzing");
+      assert.deepEqual(view.questions[0]?.groups.slice(0, 2).map(({ submitted, originalRank, finalRank, successful }) => [
+        submitted, originalRank, finalRank, successful,
+      ]), [[true, 1, 1, true], [true, 2, 2, false]]);
+      assert.deepEqual(view.questions[0]?.groups[0]?.answers, [
+        { subquestionNumber: 1, answer: "A1" }, { subquestionNumber: 2, answer: "A2" },
+      ]);
+    } else {
+      submitAnswers(activity, "group-1", 8, { 1: "A3", 2: "A4" });
+      submitAnswers(activity, "group-2", 8, { 1: "B3", 2: "B4" });
+      const view = createTeacherView(activity);
+      assert.equal(view.stage, "buzzing");
+      assert.deepEqual(view.questions[1]?.groups.slice(0, 2).map(({ submitted, originalRank, finalRank, successful, skipped, explanation }) => [
+        submitted, originalRank, finalRank, successful, skipped, explanation,
+      ]), [
+        [true, 1, null, false, true, "第 1 組已達上限 1 題"],
+        [true, 2, 1, true, false, "遞補：第 1 組已達上限"],
+      ]);
+    }
+  }
+});
+
 test("teacher view includes per-question rank and preserves internal server sequence", () => {
   const activity = createActivityState(questionSet(), { activityCode: "2468" });
   transitionActivityStage(activity, "buzzing");

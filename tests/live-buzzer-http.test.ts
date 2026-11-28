@@ -423,6 +423,58 @@ test("認證老師 HTTP 活動畫面取得各組線上學生頁面數", async ()
   });
 });
 
+test("同一活動提交後 HTTP 與 Socket 老師視圖欄位一致", async () => {
+  await withServer(async (base, _directory, app) => {
+    const activity = app.manager.create(fixtureSet(), { activityCode: "2468", rankingRule: "cap" });
+    activity.stage = "buzzing";
+    const teacher = createClient(base, {
+      autoConnect: false, forceNew: true, reconnection: false, transports: ["websocket"],
+      auth: { role: "teacher", pin: PIN },
+    });
+    const student = createClient(base, {
+      autoConnect: false, forceNew: true, reconnection: false, transports: ["websocket"],
+      auth: { role: "student", sessionToken: "team-a-session" },
+    });
+    const nextTeacherView = () => new Promise<unknown>((resolve) => teacher.once("activity:teacher-view", resolve));
+    const connect = (socket: ReturnType<typeof createClient>) => new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("connect_error", reject);
+      socket.connect();
+    });
+    try {
+      const initialView = nextTeacherView();
+      await connect(teacher);
+      await initialView;
+      const joinedView = nextTeacherView();
+      await connect(student);
+      await joinedView;
+
+      const pushedView = nextTeacherView();
+      assert.deepEqual(await student.emitWithAck("student:submit", {
+        questionNumber: 1, answers: { 1: "Socket 即時答案" },
+      }), { ok: true, questionNumber: 1 });
+      const socketView = await pushedView;
+      const response = await fetch(`${base}/api/teacher/view`, { headers: teacherHeaders() });
+      assert.equal(response.status, 200);
+      const httpView = (await response.json() as { activity: Record<string, unknown> }).activity;
+
+      assert.equal((httpView.rankingRule as { name: string }).name, "均分上限");
+      assert.deepEqual(socketView, httpView);
+      const table = (socketView as { stage: string; questions: { groups: { submitted: boolean; originalRank: number | null; finalRank: number | null; answers: { answer: string }[] | null }[] }[] });
+      assert.equal(table.stage, "buzzing");
+      assert.deepEqual(table.questions[0]?.groups[0], {
+        groupId: "group-1", groupName: "第 1 組", submitted: true,
+        sequence: 1, rank: 1, originalRank: 1, finalRank: 1,
+        successful: true, skipped: false, explanation: "",
+        answers: [{ subquestionNumber: 1, answer: "Socket 即時答案" }],
+      });
+    } finally {
+      teacher.disconnect();
+      student.disconnect();
+    }
+  });
+});
+
 test("HTTP server 重啟後活動與提交歸零，匯入題目集仍可讀取", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-restart-"));
   const questionDirectory = path.join(directory, "guided-notes");

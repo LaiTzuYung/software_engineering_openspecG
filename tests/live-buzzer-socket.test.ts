@@ -288,6 +288,42 @@ test("Socket student views expose only the current group's answers before and af
   assert.equal(JSON.stringify(endedView).includes("987654"), false);
 });
 
+test("student Socket submission pushes a live teacher view in both ranking modes", async (context) => {
+  for (const rankingRule of ["speed", "cap"] as const) {
+    const manager = new ActivityManager();
+    const activity = manager.create(questionSet(), { activityCode: "2468", rankingRule });
+    transitionActivityStage(activity, "buzzing");
+    const harness = await startSocketHarness(manager);
+    const teacher = client(harness.url, { role: "teacher", pin: TEACHER_PIN });
+    const student = client(harness.url, { role: "student", sessionToken: "team-a-token" });
+    context.after(async () => harness.close());
+    context.after(() => teacher.disconnect());
+    context.after(() => student.disconnect());
+    await Promise.all([connectAndReadTeacherView(teacher), connectAndReadStudentView(student)]);
+
+    const teacherUpdate = nextEvent<{ stage: string; questions: { groups: {
+      groupId: string; submitted: boolean; originalRank: number | null; finalRank: number | null;
+      successful: boolean; answers: { subquestionNumber: number; answer: string }[] | null;
+    }[] }[] }>(teacher, "activity:teacher-view");
+    assert.deepEqual(await student.emitWithAck("student:submit", {
+      questionNumber: 7, answers: { 1: `live-${rankingRule}-one`, 2: `live-${rankingRule}-two` },
+    }), { ok: true, questionNumber: 7 });
+    const update = await teacherUpdate;
+    assert.equal(update.stage, "buzzing");
+    assert.deepEqual(update.questions[0]?.groups[0], {
+      groupId: "group-1", groupName: "第 1 組", submitted: true,
+      sequence: 1, rank: 1, originalRank: 1, finalRank: 1, successful: true,
+      skipped: false, explanation: "", answers: [
+        { subquestionNumber: 1, answer: `live-${rankingRule}-one` },
+        { subquestionNumber: 2, answer: `live-${rankingRule}-two` },
+      ],
+    });
+
+    const studentState = await student.emitWithAck("student:get-state") as { view: unknown };
+    assert.doesNotMatch(JSON.stringify(studentState.view), /"(?:rank|originalRank|finalRank|skipped|successful)"\s*:/u);
+  }
+});
+
 test("two Socket clients submitting the same question near-simultaneously get server-ordered unique sequences", async (context) => {
   const manager = new ActivityManager();
   const activity = manager.create(questionSet(), { activityCode: "2468" });

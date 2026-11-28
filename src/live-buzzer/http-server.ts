@@ -77,10 +77,6 @@ function readPin(request: IncomingMessage): string | undefined {
   return typeof header === "string" ? header : cookiePin(request);
 }
 
-function teacherActivityView(activity: import("./model.ts").ActivityState, io: import("socket.io").Server) {
-  return createTeacherView(activity, countOnlineStudentPages(io, activity));
-}
-
 export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): LiveBuzzerServer {
   const teacherPin = options.teacherPin ?? process.env.TEACHER_PIN ?? randomBytes(4).toString("hex").toUpperCase();
   const manager = new ActivityManager();
@@ -143,7 +139,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             ...(groupNames === undefined ? {} : { groupNames }),
             rankingRule,
           });
-          sendJson(response, 201, { activity: teacherActivityView(activity, socketServer) }); return;
+          sendJson(response, 201, { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
         }
         if (method === "POST" && route === "/api/teacher/ranking-rule") {
           const body = await readJson(request);
@@ -158,10 +154,10 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
               if (view !== undefined) client.emit("activity:student-view", view);
             } else if (client.data.role === "teacher") {
-              client.emit("activity:teacher-view", teacherActivityView(activity, socketServer));
+              client.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(socketServer, activity)));
             }
           }
-          sendJson(response, 200, { activity: teacherActivityView(activity, socketServer) }); return;
+          sendJson(response, 200, { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
         }
         if (method === "POST" && (route === "/api/teacher/start" || route === "/api/teacher/end")) {
           const activity = manager.getActive();
@@ -172,9 +168,9 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
               if (view !== undefined) client.emit("activity:student-view", view);
-            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", teacherActivityView(activity, io));
+            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(io, activity)));
           }
-          sendJson(response, 200, { activity: teacherActivityView(activity, io) }); return;
+          sendJson(response, 200, { activity: createTeacherView(activity, countOnlineStudentPages(io, activity)) }); return;
         }
         if (method === "POST" && route === "/api/teacher/descriptions") {
           const body = await readJson(request);
@@ -185,13 +181,13 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
               if (view !== undefined) client.emit("activity:student-view", view);
-            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", teacherActivityView(activity, socketServer));
+            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(socketServer, activity)));
           }
-          sendJson(response, 200, { activity: teacherActivityView(activity, socketServer) }); return;
+          sendJson(response, 200, { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
         }
         if (method === "GET" && route === "/api/teacher/view") {
           const activity = manager.getActive();
-          sendJson(response, 200, activity === undefined ? { activity: null } : { activity: teacherActivityView(activity, socketServer) }); return;
+          sendJson(response, 200, activity === undefined ? { activity: null } : { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
         }
         if (method === "POST" && route === "/api/teacher/import/preview") {
           const body = await readJson(request);
