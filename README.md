@@ -88,6 +88,8 @@ npm start
 3. 要復原時按「**還原最近一次回寫**」；已被手動修改過的格子會跳過並列出原因。
 4. 按「**下載 CSV**」取得活動結果。
 
+活動與學生分頁身分會保存至本機 `data/live-buzzer-activity.json`；伺服器重新啟動後會恢復目前活動及階段，學生分頁以原 session 自動回到原組。老師設定固定 `TEACHER_PIN` 時會自動重連；未設定時每次啟動會產生新 PIN，需重新登入。回寫與還原預覽快照只存在伺服器記憶體，重啟後請重新按「回寫預覽」或「還原預覽」。
+
 ## 測試
 
 ```powershell
@@ -114,8 +116,10 @@ npm run import -- <Google 試算表網址>
 ## 已知限制與設計決定
 
 - **不判斷答案對錯**：依需求「最快搶答者為成功」，以最先送出的組為成功組；老師可在表格看到所有組的答案。
-- **活動資料只存在記憶體**：活動、分組、提交與學生身分在伺服器重新啟動後消失；已匯入的題目集與回寫備份會保留。
-- **同時只有 1 個活動**。
+- **目前活動保存於本機**：活動快照位置為 `data/live-buzzer-activity.json`，包含活動設定、建立時題目集副本、已接受提交及學生 session 身分。伺服器重啟後恢復目前活動；各組線上頁面數會從 0 開始並在學生重連後更新。
+- **同時只有 1 個活動**：建立新活動會取代目前活動與活動快照，舊學生 session 隨即失效。
+- **老師 PIN**：固定設定 `TEACHER_PIN` 時重啟後不變，老師分頁會以 `sessionStorage` 自動重連；未設定時每次啟動會產生新 PIN，老師須重新登入。
+- **回寫預覽只存記憶體**：回寫與還原預覽快照不保存於活動檔，重新啟動後需重新按「回寫預覽」或「還原預覽」。原值回寫備份仍保存在 `data/spreadsheet-export-backups/`，可供 restore-first 還原。
 - **CSV 送出時間為台灣時間 UTC+8**，格式為 `YYYY-MM-DDTHH:mm:ss+08:00`，精確到秒且不含毫秒；伺服器內部仍記錄 UTC ISO 8601 時間。
 - **回寫備份只在本機** `data/spreadsheet-export-backups/`，請勿刪除，否則無法還原。
 - 最終順位等於原始順位（未實作公平機制）；說明欄留空。
@@ -128,6 +132,7 @@ npm run import -- <Google 試算表網址>
 ```
 src/guided-notes/      試算表讀取、Guided Notes 解析、匯入與回寫比對
 src/live-buzzer/       HTTP／Socket.IO 伺服器、活動模型、老師頁與學生頁、CSV
+data/live-buzzer-activity.json  目前活動與學生身分的持久化快照（本機產生）
 tests/                 自動測試與 T1～T5 fixtures
 openspec/specs/        主規格：guided-notes-import、live-buzzer、result-export
 openspec/changes/archive/  已封存的四個 change（proposal、spec、design、tasks）

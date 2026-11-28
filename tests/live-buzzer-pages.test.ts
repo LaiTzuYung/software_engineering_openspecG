@@ -7,6 +7,7 @@ function createTeacherPageHarness(fetchImpl: (url: string, ...args: any[]) => Pr
   const ioCalls: unknown[] = [];
   const socketHandlers = new Map<string, (payload: unknown) => void>();
   const document = {
+    body: { classList: { add() {}, remove() {} } },
     querySelector(selector: string) {
       let element = elements.get(selector);
       if (element === undefined) {
@@ -80,6 +81,11 @@ test("teacher and student pages render ranking controls, results and no-success 
   assert.doesNotMatch(buzzingRender, /順位|已達上限|跳過|遞補|成功組|不成功/u);
 });
 
+test("teacher export text documents the persisted activity and in-memory previews", () => {
+  assert.match(teacherPage, /活動會保存於本機，伺服器重新啟動後自動恢復；回寫預覽需重新按一次。/u);
+  assert.match(teacherPage, /回寫與還原預覽快照只存在伺服器記憶體/u);
+});
+
 test("teacher login stores the PIN and the teacher page connects on load, handles views, and enables reconnect", () => {
   assert.match(teacherLoginPage, /sessionStorage\.setItem\('teacherPin',pin\);location\.href='\/teacher'/u);
   assert.match(teacherPage, /<script src="\/socket\.io\/socket\.io\.js"><\/script><script>/u);
@@ -98,6 +104,30 @@ test("teacher login stores the PIN and the teacher page connects on load, handle
 
   const afterReload = createTeacherPageHarness();
   assert.equal(afterReload.ioCalls.length, 1, "重新載入老師頁時會依 sessionStorage 重新建立 Socket 連線");
+});
+
+test("all live pages keep retrying on temporary outages and only clear identity for explicit auth errors", () => {
+  const temporaryMessage = "連線中斷，重新連線中…";
+  const teacherInvalidMessage = "伺服器已重新啟動，請輸入新的老師 PIN";
+  const studentInvalidMessage = "活動已更換或身分已失效，請重新加入";
+  for (const page of [teacherPage, studentPage, screenPage]) {
+    assert.match(page, new RegExp(temporaryMessage));
+    assert.match(page, /connect_error/u);
+    assert.match(page, /disconnect/u);
+    assert.match(page, /reconnection:true/u);
+  }
+  assert.match(teacherPage, new RegExp(teacherInvalidMessage));
+  assert.match(teacherPage, /auth:invalid/u);
+  assert.match(teacherPage, /invalid-teacher-pin/u);
+  assert.match(studentPage, new RegExp(studentInvalidMessage));
+  assert.match(studentPage, /auth:invalid/u);
+  assert.match(studentPage, /invalid-student-session/u);
+  const studentReconnect = studentPage.split('function connectStudent(token){')[1]?.split('\nfunction leaveActivity')[0];
+  assert.ok(studentReconnect);
+  assert.match(studentReconnect, /socket\.on\('connect_error',showDisconnected\)/u);
+  assert.doesNotMatch(studentReconnect, /clearSavedIdentity\(\)|joinForm\.hidden=false/u);
+  assert.match(studentReconnect, /catch\{showDisconnected\(\)\}/u);
+  assert.match(teacherLoginPage, new RegExp(teacherInvalidMessage));
 });
 
 test("還原預覽依手動修改狀態顯示不同顏色及原值欄，且預覽不會送出確認", async () => {

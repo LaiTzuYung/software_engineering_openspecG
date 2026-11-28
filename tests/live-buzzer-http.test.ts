@@ -322,9 +322,9 @@ function teacherHeaders(): HeadersInit { return { "x-teacher-pin": PIN, "content
 
 test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或老師 API 程式碼", async () => {
   await withServer(async (base) => {
-    const unauthorizedPage = await fetch(`${base}/teacher`);
-    assert.equal(unauthorizedPage.status, 401);
-    assert.equal(await unauthorizedPage.text(), JSON.stringify({ error: "unauthorized" }));
+    const unauthorizedPage = await fetch(`${base}/teacher`, { redirect: "manual" });
+    assert.equal(unauthorizedPage.status, 302);
+    assert.equal(unauthorizedPage.headers.get("location"), "/teacher-login?reason=invalid-teacher-pin");
     const unauthorizedAction = await fetch(`${base}/api/teacher/start`, { method: "POST", body: "{}" });
     assert.equal(unauthorizedAction.status, 401);
     assert.equal((await unauthorizedAction.text()).includes("開始搶答"), false);
@@ -333,6 +333,7 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "wrong" }),
     });
     assert.equal(invalidLogin.status, 401);
+    assert.deepEqual(await invalidLogin.json(), { error: "invalid-teacher-pin" });
     const login = await fetch(`${base}/api/teacher/session`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: PIN }),
     });
@@ -358,7 +359,8 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     assert.match(teacherHtml, /id="export-restore-button"[^>]*>還原預覽/u);
     assert.match(teacherHtml, /id="export-restore-confirm-button"[^>]*>確認還原/u);
     assert.match(teacherHtml, /下載 CSV/u);
-    assert.match(teacherHtml, /活動資料只存在伺服器記憶體，重啟後消失/u);
+    assert.match(teacherHtml, /活動會保存於本機，伺服器重新啟動後自動恢復；回寫預覽需重新按一次。/u);
+    assert.match(teacherHtml, /回寫與還原預覽快照只存在伺服器記憶體/u);
     assert.match(teacherHtml, /題目集來源為 XLSX/u);
     assert.match(teacherHtml, /fetch\('\/api\/teacher\/export\/csv',\{headers:\{'x-teacher-pin'/u);
     assert.match(teacherHtml, /URL\.createObjectURL\(blob\)/u);
@@ -375,6 +377,152 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     const studentHtml = await (await fetch(`${base}/student`)).text();
     assert.doesNotMatch(studentHtml, /開始搶答|結束活動|組別設定|\/api\/teacher|teacher:get-full-view|teacher:start/u);
   });
+});
+
+test("student identity persists across a server restart and is invalidated when a new activity replaces it", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-identity-restart-"));
+  const questionDirectory = path.join(directory, "guided-notes");
+  await mkdir(questionDirectory, { recursive: true });
+  const oneQuestionSet = fixtureSet();
+  const twoQuestionSet: GuidedNotesQuestionSet = {
+    ...oneQuestionSet, totalQuestionCount: 2, singleQuestionCount: 2,
+    questions: [oneQuestionSet.questions[0]!, {
+      ...oneQuestionSet.questions[0]!, number: 2,
+      subquestions: [{ ...oneQuestionSet.questions[0]!.subquestions[0]!, answerCell: { sheetName: "種子題目", address: "C3", row: 3, column: 3 } }],
+    }],
+  };
+  await writeFile(path.join(questionDirectory, "seed-set.json"), JSON.stringify(twoQuestionSet));
+  const createApp = () => createLiveBuzzerServer({
+    teacherPin: PIN,
+    dataDirectory: questionDirectory,
+    activityDataDirectory: directory,
+    importService: new GuidedNotesImportService(questionDirectory),
+  });
+  let app = createApp();
+  let baseUrl = await app.listen(0);
+  try {
+    const create = async () => fetch(`${baseUrl}/api/teacher/activity`, {
+      method: "POST", headers: { "content-type": "application/json", "x-teacher-pin": PIN },
+      body: JSON.stringify({ questionSetId: "seed-set", groupNames: ["甲組", "乙組"], rankingRule: "cap" }),
+    });
+    assert.equal((await create()).status, 201);
+    const joined = await fetch(`${baseUrl}/api/student/join`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ activityCode: app.manager.getActive()?.activityCode, groupId: "group-1" }),
+    });
+    assert.equal(joined.status, 201);
+    const identity = await joined.json() as { sessionToken: string; activityCode: string; groupId: string };
+    const teacher = createClient(baseUrl, { auth: { role: "teacher", pin: PIN } });
+    const firstStudent = createClient(baseUrl, { auth: { role: "student", sessionToken: identity.sessionToken } });
+    await Promise.all([new Promise<void>((resolve) => teacher.once("connect", resolve)), new Promise<void>((resolve) => firstStudent.once("connect", resolve))]);
+    assert.deepEqual(await teacher.emitWithAck("teacher:start"), { ok: true, stage: "buzzing" });
+    assert.deepEqual(await firstStudent.emitWithAck("student:submit", { questionNumber: 1, answers: { 1: "重啟前答案" } }), { ok: true, questionNumber: 1 });
+    firstStudent.close();
+    teacher.close();
+    await app.close();
+
+    app = createApp();
+    baseUrl = await app.listen(0);
+    const state = await fetch(`${baseUrl}/api/student/state?code=${identity.activityCode}`, {
+      headers: { "x-student-session": identity.sessionToken },
+    });
+    assert.equal(state.status, 200);
+    const view = await state.json() as { group: { id: string; name: string }; stage: string; rankingRule: { name: string } };
+    assert.deepEqual({ group: view.group, stage: view.stage, rule: view.rankingRule.name }, {
+      group: { id: "group-1", name: "甲組" }, stage: "buzzing", rule: "均分上限",
+    });
+    const resumedStudent = createClient(baseUrl, { auth: { role: "student", sessionToken: identity.sessionToken } });
+    await new Promise<void>((resolve, reject) => { resumedStudent.once("connect", resolve); resumedStudent.once("connect_error", reject); });
+    const resumed = await resumedStudent.emitWithAck("student:get-state") as { ok: boolean; view: { questions: { subquestions: { submitted: boolean; answer?: string }[] }[] } };
+    assert.equal(resumed.ok, true);
+    assert.deepEqual(resumed.view.questions[0]?.subquestions, [{ number: 1, submitted: true, answer: "重啟前答案" }]);
+    assert.deepEqual(await resumedStudent.emitWithAck("student:submit", { questionNumber: 1, answers: { 1: "續交答案" } }), { ok: false, reason: "already-submitted" });
+    assert.deepEqual(await resumedStudent.emitWithAck("student:submit", { questionNumber: 2, answers: { 1: "重啟後續交" } }), { ok: true, questionNumber: 2 });
+    assert.equal(app.manager.getActive()!.submissions.get(1)?.get("group-1")?.sequence, 1);
+    assert.equal(app.manager.getActive()!.submissions.get(2)?.get("group-1")?.sequence, 2);
+    assert.equal(app.manager.getActive()!.nextSubmissionSequence, 3);
+    resumedStudent.close();
+
+    assert.equal((await create()).status, 201);
+    const newCode = app.manager.getActive()!.activityCode;
+    const invalidated = await fetch(`${baseUrl}/api/student/state?code=${newCode}`, {
+      headers: { "x-student-session": identity.sessionToken },
+    });
+    assert.equal(invalidated.status, 401);
+    assert.deepEqual(await invalidated.json(), { error: "invalid-student-session" });
+    const staleStudent = createClient(baseUrl, { auth: { role: "student", sessionToken: identity.sessionToken } });
+    const invalidIdentity = new Promise<string>((resolve, reject) => {
+      staleStudent.once("auth:invalid", (payload: { code: string }) => resolve(payload.code));
+      staleStudent.once("connect_error", reject);
+    });
+    assert.equal(await invalidIdentity, "invalid-student-session");
+    staleStudent.close();
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("random teacher PIN changes between restarts and Socket auth returns a dedicated invalid-PIN code", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-random-pin-"));
+  let first = createLiveBuzzerServer({ activityDataDirectory: directory });
+  const firstUrl = await first.listen(0);
+  const oldPin = first.teacherPin;
+  await first.close();
+  const second = createLiveBuzzerServer({ activityDataDirectory: directory });
+  const secondUrl = await second.listen(0);
+  try {
+    assert.notEqual(second.teacherPin, oldPin);
+    const response = await fetch(`${secondUrl}/api/teacher/session`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: oldPin }),
+    });
+    assert.equal(response.status, 401);
+    assert.deepEqual(await response.json(), { error: "invalid-teacher-pin" });
+    const teacher = createClient(secondUrl, { auth: { role: "teacher", pin: oldPin } });
+    const invalid = new Promise<string>((resolve, reject) => {
+      teacher.once("auth:invalid", (payload: { code: string }) => resolve(payload.code));
+      teacher.once("connect_error", reject);
+    });
+    assert.equal(await invalid, "invalid-teacher-pin");
+    teacher.close();
+  } finally {
+    await second.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("fixed teacher PIN remains valid after restart for automatic Socket reconnection", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-fixed-pin-"));
+  const questionDirectory = path.join(directory, "guided-notes");
+  await mkdir(questionDirectory, { recursive: true });
+  await writeFile(path.join(questionDirectory, "seed-set.json"), JSON.stringify(fixtureSet()));
+  const createApp = () => createLiveBuzzerServer({ teacherPin: PIN, dataDirectory: questionDirectory, activityDataDirectory: directory });
+  const first = createApp();
+  const firstUrl = await first.listen(0);
+  const createResponse = await fetch(`${firstUrl}/api/teacher/activity`, {
+    method: "POST", headers: { "content-type": "application/json", "x-teacher-pin": PIN },
+    body: JSON.stringify({ questionSetId: "seed-set" }),
+  });
+  assert.equal(createResponse.status, 201);
+  const firstView = await createResponse.json() as { activity: { activityCode: string } };
+  await first.close();
+  const second = createApp();
+  const baseUrl = await second.listen(0);
+  const teacher = createClient(baseUrl, { auth: { role: "teacher", pin: PIN }, reconnection: true });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      teacher.once("connect", resolve);
+      teacher.once("connect_error", reject);
+    });
+    const view = await teacher.emitWithAck("teacher:get-full-view");
+    assert.equal((view as { ok: boolean }).ok, true);
+    assert.equal((view as { view: { activityCode: string; stage: string } }).view.activityCode, firstView.activity.activityCode);
+    assert.equal((view as { view: { activityCode: string; stage: string } }).view.stage, "preparing");
+  } finally {
+    teacher.close();
+    await second.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("npm server factory 在同一 HTTP server 提供頁面及 Socket.IO", async () => {

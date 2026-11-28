@@ -101,6 +101,8 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
     if (activitySnapshotLoaded) return;
     const restored = await activityStore.load();
     manager.replace(restored?.activity);
+    studentSessions.clear();
+    for (const [token, identity] of restored?.studentSessions ?? []) studentSessions.set(token, identity);
     activitySnapshotLoaded = true;
   };
   const server = createServer(async (request, response) => {
@@ -128,7 +130,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
       try {
         const body = await readJson(request);
         if (!safeEqual(typeof body.pin === "string" ? body.pin : undefined, teacherPin)) {
-          sendJson(response, 401, { error: "unauthorized" }); return;
+          sendJson(response, 401, { error: "invalid-teacher-pin" }); return;
         }
         sendJson(response, 200, { ok: true }, { "set-cookie": `teacher_pin=${encodeURIComponent(teacherPin)}; HttpOnly; SameSite=Strict; Path=/` });
       } catch { sendJson(response, 400, { error: "invalid-request" }); }
@@ -136,7 +138,12 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
     }
 
     if (route === "/teacher" || route.startsWith("/api/teacher/")) {
-      if (!safeEqual(readPin(request), teacherPin)) { sendJson(response, 401, { error: "unauthorized" }); return; }
+      if (!safeEqual(readPin(request), teacherPin)) {
+        if (method === "GET" && route === "/teacher") {
+          response.writeHead(302, { location: "/teacher-login?reason=invalid-teacher-pin", "cache-control": "no-store" }); response.end(); return;
+        }
+        sendJson(response, 401, { error: "invalid-teacher-pin" }); return;
+      }
       if (method === "GET" && route === "/teacher") {
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); response.end(teacherPage); return;
       }
@@ -159,6 +166,8 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
           const groupNames = Array.isArray(body.groupNames) && body.groupNames.every((name) => typeof name === "string")
             ? body.groupNames as string[] : undefined;
           const previousActivity = manager.getActive();
+          const previousSessions = new Map(studentSessions);
+          studentSessions.clear();
           const activity = manager.create(set, {
             ...(groupNames === undefined ? {} : { groupNames }),
             rankingRule,
@@ -168,7 +177,16 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             persistedActivity = await persistActivity(activity);
           } catch (error) {
             manager.replace(previousActivity);
+            studentSessions.clear();
+            for (const [token, identity] of previousSessions) studentSessions.set(token, identity);
             throw error;
+          }
+          for (const socket of socketServer.sockets.sockets.values()) {
+            if ((socket.data as { role?: string; studentIdentity?: { activityCode: string } }).role !== "student") continue;
+            const identity = (socket.data as { studentIdentity?: { activityCode: string } }).studentIdentity;
+            if (identity?.activityCode === persistedActivity.activityCode) continue;
+            socket.emit("auth:invalid", { code: "invalid-student-session" });
+            socket.disconnect(true);
           }
           broadcastScreenView(socketServer, persistedActivity);
           sendJson(response, 201, { activity: createTeacherView(persistedActivity, countOnlineStudentPages(socketServer, persistedActivity)) }); return;
@@ -388,6 +406,12 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
         if (group === undefined) { sendJson(response, 400, { error: "group-not-found" }); return; }
         const sessionToken = randomUUID();
         studentSessions.set(sessionToken, { activityCode: activity.activityCode, groupId: group.id });
+        try {
+          await persistActivity(activity);
+        } catch {
+          studentSessions.delete(sessionToken);
+          sendJson(response, 500, { error: "persistence-failed" }); return;
+        }
         sendJson(response, 201, {
           sessionToken,
           activityCode: activity.activityCode,

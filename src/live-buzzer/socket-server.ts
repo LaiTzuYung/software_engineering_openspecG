@@ -143,6 +143,11 @@ export function createLiveBuzzerSocketServer(
         ? "anonymous"
         : "student";
     if (auth.role === "screen") socketData.role = "screen";
+    if (auth.role === "teacher" && socketData.role !== "teacher") {
+      socket.emit("auth:invalid", { code: "invalid-teacher-pin" });
+    } else if (auth.role === "student" && socketData.role !== "student") {
+      socket.emit("auth:invalid", { code: "invalid-student-session" });
+    }
     if (identity !== undefined && socketData.role === "student") {
       socketData.studentIdentity = identity;
       const activity = getActiveActivity(manager);
@@ -172,10 +177,16 @@ export function createLiveBuzzerSocketServer(
 
     socket.on("student:get-state", (callback: unknown) => {
       if (!isStudent(socket)) {
-        acknowledge(callback, { ok: false, reason: "unauthorized" });
+        const invalidIdentity = (socket.handshake.auth as AuthPayload).role === "student";
+        acknowledge(callback, { ok: false, reason: invalidIdentity ? "invalid-student-session" : "unauthorized", ...(invalidIdentity ? { code: "invalid-student-session" } : {}) });
         return;
       }
       const activity = getActiveActivity(manager);
+      if (!isValidStudentIdentity(activity, socket.data.studentIdentity)) {
+        socket.emit("auth:invalid", { code: "invalid-student-session" });
+        acknowledge(callback, { ok: false, reason: "invalid-student-session", code: "invalid-student-session" });
+        return;
+      }
       const view = activity === undefined
         ? undefined
         : createStudentView(activity, socket.data.studentIdentity!.groupId);
@@ -188,10 +199,16 @@ export function createLiveBuzzerSocketServer(
 
     socket.on("student:submit", async (payload: unknown, callback: unknown) => {
       if (!isStudent(socket)) {
-        acknowledge(callback, { ok: false, reason: "unauthorized" });
+        const invalidIdentity = (socket.handshake.auth as AuthPayload).role === "student";
+        acknowledge(callback, { ok: false, reason: invalidIdentity ? "invalid-student-session" : "unauthorized", ...(invalidIdentity ? { code: "invalid-student-session" } : {}) });
         return;
       }
       const activity = getActiveActivity(manager);
+      if (!isValidStudentIdentity(activity, socket.data.studentIdentity)) {
+        socket.emit("auth:invalid", { code: "invalid-student-session" });
+        acknowledge(callback, { ok: false, reason: "invalid-student-session", code: "invalid-student-session" });
+        return;
+      }
       if (activity === undefined || !isRecord(payload) ||
           typeof payload.questionNumber !== "number" || !isAnswerMap(payload.answers)) {
         acknowledge(callback, { ok: false, reason: "invalid-request" });
