@@ -97,6 +97,39 @@ test("回寫預覽 API 顯示 A1、目前值、預計值與中文狀態，並以
   } });
 });
 
+test("公開大螢幕頁與 HTTP 狀態端點只提供階段白名單", async () => {
+  await withServer(async (base, _directory, app) => {
+    const empty = await fetch(`${base}/api/screen/state`);
+    assert.equal(empty.status, 200);
+    assert.deepEqual(await empty.json(), { activity: null });
+    const page = await fetch(`${base}/screen`);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /大螢幕/);
+
+    const activity = app.manager.create(fixtureSet(), { activityCode: "2468" });
+    let view = (await (await fetch(`${base}/api/screen/state`)).json() as { activity: any }).activity;
+    assert.equal(view.stage, "preparing");
+    assert.equal(view.groupCount, 4);
+    assert.equal(view.activityCode, "2468");
+
+    activity.stage = "buzzing";
+    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "SCREEN-WINNER" }).accepted, true);
+    assert.equal(submitAnswers(activity, "group-2", 1, { 1: "SCREEN-LOSER" }).accepted, true);
+    view = (await (await fetch(`${base}/api/screen/state`)).json() as { activity: any }).activity;
+    assert.equal(view.stage, "buzzing");
+    const buzzing = JSON.stringify(view);
+    for (const forbidden of ["SCREEN-WINNER", "SCREEN-LOSER", "group-1", "第 1 組", "originalRank", "finalRank", '"rank"', '"position"', '"finalPosition"', "successful", "answers", "sequence"]) {
+      assert.equal(buzzing.includes(forbidden), false, `HTTP 搶答視圖不可包含 ${forbidden}`);
+    }
+
+    activity.stage = "ended";
+    view = (await (await fetch(`${base}/api/screen/state`)).json() as { activity: any }).activity;
+    assert.equal(view.stage, "ended");
+    assert.equal(JSON.stringify(view).includes("SCREEN-WINNER"), true);
+    assert.equal(JSON.stringify(view).includes("SCREEN-LOSER"), false);
+  });
+});
+
 test("確認回寫遇到缺少編輯權限時回報中文錯誤並把先前備份標記失敗", async () => {
   await withServer(async (base, _directory, app) => {
     await makeEndedExportActivity(app);
@@ -546,7 +579,7 @@ test("HTTP 學生視圖在活動進行中及結束後只包含本組已提交答
       assert.equal(response.status, 200);
       const view = await response.json() as {
         questions: { subquestions: { submitted: boolean; answer?: string }[] }[];
-        results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null; explanation: string | null }[] | null;
+        results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null; otherSubmissions: { group: { id: string; name: string }; originalRank: number; skipped: boolean }[]; explanation: string | null }[] | null;
       };
       assert.equal(view.questions[0]?.subquestions[0]?.answer, "TEAM-A-ANSWER");
       if (stage === "buzzing") {
@@ -562,11 +595,12 @@ test("HTTP 學生視圖在活動進行中及結束後只包含本組已提交答
           questionNumber: 1,
           successfulGroup: { id: "group-2", name: "第 2 組" },
           answers: [{ subquestionNumber: 1, answer: "SECRET-ANSWER-B" }],
+          otherSubmissions: [{ group: { id: "group-1", name: "第 1 組" }, originalRank: 2, skipped: false }],
           explanation: null,
         }]);
         const ownAnswers = view.questions.flatMap(({ subquestions }) => subquestions.map(({ answer }) => answer));
         assert.deepEqual(ownAnswers, ["TEAM-A-ANSWER"]);
-        assert.doesNotMatch(JSON.stringify(view), /"(?:rank|originalRank|finalRank)"\s*:/u);
+        assert.doesNotMatch(JSON.stringify(view), /"finalRank"\s*:/u);
         assert.equal(JSON.stringify(view).includes("sequence"), false);
         assert.equal(JSON.stringify(view).includes("987654"), false);
       }

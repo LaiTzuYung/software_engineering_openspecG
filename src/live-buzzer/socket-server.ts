@@ -2,7 +2,7 @@ import type { Server as HttpServer } from "node:http";
 import { Server, type Socket } from "socket.io";
 import type { ActivityManager, ActivityState, RankingRule } from "./model.ts";
 import { submitAnswers } from "./submissions.ts";
-import { createStudentView, createTeacherView } from "./views.ts";
+import { createScreenView, createStudentView, createTeacherView } from "./views.ts";
 
 export interface StudentSocketIdentity {
   readonly activityCode: string;
@@ -14,7 +14,7 @@ export interface LiveBuzzerSocketOptions {
   readonly resolveStudentSession: (sessionToken: string) => StudentSocketIdentity | undefined;
 }
 
-type SocketRole = "teacher" | "student" | "anonymous";
+type SocketRole = "teacher" | "student" | "screen" | "anonymous";
 
 interface AuthPayload {
   readonly role?: unknown;
@@ -110,6 +110,13 @@ function broadcastTeacherView(io: Server, activity: ActivityState): void {
   }
 }
 
+export function broadcastScreenView(io: Server, activity: ActivityState): void {
+  const view = createScreenView(activity);
+  for (const socket of io.sockets.sockets.values()) {
+    if ((socket.data as LiveSocketData).role === "screen") socket.emit("activity:screen-view", view);
+  }
+}
+
 function rejectTeacherAction(socket: Socket, callback: unknown): boolean {
   if (isTeacher(socket)) return false;
   acknowledge(callback, { ok: false, reason: "unauthorized" });
@@ -133,6 +140,7 @@ export function createLiveBuzzerSocketServer(
       : identity === undefined
         ? "anonymous"
         : "student";
+    if (auth.role === "screen") socketData.role = "screen";
     if (identity !== undefined && socketData.role === "student") {
       socketData.studentIdentity = identity;
       const activity = getActiveActivity(manager);
@@ -146,7 +154,19 @@ export function createLiveBuzzerSocketServer(
       if (activity !== undefined) {
         socket.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(io, activity)));
       }
+    } else if (socketData.role === "screen") {
+      const activity = getActiveActivity(manager);
+      if (activity !== undefined) socket.emit("activity:screen-view", createScreenView(activity));
     }
+
+    socket.on("screen:get-state", (callback: unknown) => {
+      if (socketData.role !== "screen") {
+        acknowledge(callback, { ok: false, reason: "unauthorized" });
+        return;
+      }
+      const activity = getActiveActivity(manager);
+      acknowledge(callback, { ok: true, activity: activity === undefined ? null : createScreenView(activity) });
+    });
 
     socket.on("student:get-state", (callback: unknown) => {
       if (!isStudent(socket)) {
@@ -185,6 +205,7 @@ export function createLiveBuzzerSocketServer(
       acknowledge(callback, { ok: true, questionNumber: result.submission.questionNumber });
       broadcastStudentViews(io, activity, identity.groupId);
       broadcastTeacherView(io, activity);
+      broadcastScreenView(io, activity);
     });
 
     socket.on("teacher:start", (callback: unknown) => {
@@ -198,6 +219,7 @@ export function createLiveBuzzerSocketServer(
       acknowledge(callback, { ok: true, stage: activity.stage });
       broadcastStudentViews(io, activity);
       broadcastTeacherView(io, activity);
+      broadcastScreenView(io, activity);
     });
 
     socket.on("teacher:end", (callback: unknown) => {
@@ -211,6 +233,7 @@ export function createLiveBuzzerSocketServer(
       acknowledge(callback, { ok: true, stage: activity.stage });
       broadcastStudentViews(io, activity);
       broadcastTeacherView(io, activity);
+      broadcastScreenView(io, activity);
     });
 
     socket.on("teacher:set-ranking-rule", (payload: unknown, callback: unknown) => {
@@ -230,6 +253,7 @@ export function createLiveBuzzerSocketServer(
       acknowledge(callback, { ok: true, rankingRule: result.rankingRule });
       broadcastStudentViews(io, activity);
       broadcastTeacherView(io, activity);
+      broadcastScreenView(io, activity);
     });
 
     socket.on("teacher:set-question-descriptions", (payload: unknown, callback: unknown) => {
@@ -247,6 +271,7 @@ export function createLiveBuzzerSocketServer(
       acknowledge(callback, { ok: true, visible: payload });
       broadcastStudentViews(io, activity);
       broadcastTeacherView(io, activity);
+      broadcastScreenView(io, activity);
     });
 
     socket.on("teacher:get-full-view", (callback: unknown) => {

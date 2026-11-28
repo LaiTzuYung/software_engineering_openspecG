@@ -28,6 +28,31 @@ export interface StudentResultView {
   readonly successfulGroup: { readonly id: string; readonly name: string } | null;
   readonly answers: readonly StudentAnswerView[] | null;
   readonly explanation: string | null;
+  readonly otherSubmissions: readonly {
+    readonly group: { readonly id: string; readonly name: string };
+    readonly originalRank: number;
+    readonly skipped: boolean;
+  }[];
+}
+
+export interface ScreenQuestionView {
+  readonly number: number;
+  readonly submittedCount: number;
+  readonly totalGroups: number;
+  readonly results?: {
+    readonly successfulGroup: { readonly id: string; readonly name: string } | null;
+    readonly answers: readonly StudentAnswerView[] | null;
+    readonly others: readonly { readonly groupName: string; readonly originalRank: number; readonly skipped: boolean }[];
+    readonly explanation: string | null;
+  };
+}
+
+export interface ScreenView {
+  readonly activityCode: string;
+  readonly stage: ActivityStage;
+  readonly groupCount: number;
+  readonly rankingRule: RankingRuleView;
+  readonly questions: readonly ScreenQuestionView[];
 }
 
 export interface StudentView {
@@ -76,6 +101,48 @@ export interface TeacherView {
     }[];
     readonly explanation: string | null;
   }[];
+}
+
+/** Builds a stage-specific projection view from an explicit, minimal allowlist. */
+export function createScreenView(activity: ActivityState): ScreenView {
+  const ranking = activity.stage === "ended" ? calculateRankingResults(activity) : null;
+  const questions: ScreenQuestionView[] = activity.questionSet.questions.map((question) => {
+    const submissions = activity.submissions.get(question.number);
+    const base: ScreenQuestionView = {
+      number: question.number,
+      submittedCount: submissions?.size ?? 0,
+      totalGroups: activity.groups.length,
+    };
+    if (ranking === null) return base;
+    const result = ranking.questions.find(({ questionNumber }) => questionNumber === question.number);
+    const winner = result?.successfulGroup ?? null;
+    const answers = result?.answers === null || result?.answers === undefined
+      ? null
+      : question.subquestions.map(({ number }) => ({ subquestionNumber: number, answer: result.answers![number] ?? "" }));
+    const others = ranking.submissions.filter(({ submission }) => submission.questionNumber === question.number)
+      .filter(({ successful }) => !successful)
+      .map(({ submission, originalRank, skipped }) => ({
+        groupName: activity.groups.find(({ id }) => id === submission.groupId)?.name ?? submission.groupId,
+        originalRank,
+        skipped,
+      }));
+    return {
+      ...base,
+      results: {
+        successfulGroup: winner,
+        answers,
+        others,
+        explanation: result?.explanation ?? (submissions === undefined || submissions.size === 0 ? "沒有組別送出" : null),
+      },
+    };
+  });
+  return {
+    activityCode: activity.activityCode,
+    stage: activity.stage,
+    groupCount: activity.groups.length,
+    rankingRule: createRankingRuleView(activity.rankingRule, activity.questionSet.questions.length, activity.groups.length),
+    questions,
+  };
 }
 
 /**
@@ -208,6 +275,16 @@ function createStudentResults(activity: ActivityState): readonly StudentResultVi
         }));
       }
     }
-    return { questionNumber: result.questionNumber, successfulGroup, answers, explanation: result.explanation };
+    const otherSubmissions = calculateRankingResults(activity).submissions
+      .filter(({ submission, successful }) => submission.questionNumber === result.questionNumber && !successful)
+      .map(({ submission, originalRank, skipped }) => ({
+        group: {
+          id: submission.groupId,
+          name: activity.groups.find(({ id }) => id === submission.groupId)?.name ?? submission.groupId,
+        },
+        originalRank,
+        skipped,
+      }));
+    return { questionNumber: result.questionNumber, successfulGroup, answers, explanation: result.explanation, otherSubmissions };
   });
 }

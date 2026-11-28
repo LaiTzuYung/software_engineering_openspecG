@@ -9,11 +9,11 @@ import { SpreadsheetExportPreviewService, SpreadsheetExportWriteError } from "..
 import { createPreviewFromInput } from "../cli.ts";
 import { ActivityManager, transitionActivityStage, type RankingRule } from "./model.ts";
 import { QuestionSetRepository } from "./question-sets.ts";
-import { countOnlineStudentPages, createLiveBuzzerSocketServer } from "./socket-server.ts";
-import { createStudentStatusResponse, createStudentView, createTeacherView } from "./views.ts";
+import { broadcastScreenView, countOnlineStudentPages, createLiveBuzzerSocketServer } from "./socket-server.ts";
+import { createScreenView, createStudentStatusResponse, createStudentView, createTeacherView } from "./views.ts";
 import { successfulAnswersForExport } from "./result-export.ts";
 import { createResultsCsv } from "./result-csv.ts";
-import { studentPage, teacherLoginPage, teacherPage } from "./pages.ts";
+import { screenPage, studentPage, teacherLoginPage, teacherPage } from "./pages.ts";
 
 export interface LiveBuzzerServerOptions {
   readonly teacherPin?: string;
@@ -98,6 +98,13 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
     if (method === "GET" && route === "/student") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); response.end(studentPage); return;
     }
+    if (method === "GET" && route === "/screen") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); response.end(screenPage); return;
+    }
+    if (method === "GET" && route === "/api/screen/state") {
+      const activity = manager.getActive();
+      sendJson(response, 200, { activity: activity === undefined ? null : createScreenView(activity) }); return;
+    }
     if (method === "GET" && route === "/teacher-login") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); response.end(teacherLoginPage); return;
     }
@@ -139,6 +146,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             ...(groupNames === undefined ? {} : { groupNames }),
             rankingRule,
           });
+          broadcastScreenView(socketServer, activity);
           sendJson(response, 201, { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
         }
         if (method === "POST" && route === "/api/teacher/ranking-rule") {
@@ -149,6 +157,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
             sendJson(response, 409, { error: result.reason === "ranking-rule-locked" ? result.message : "activity-unavailable" }); return;
           }
           const activity = manager.getActive()!;
+          broadcastScreenView(socketServer, activity);
           for (const client of socketServer.sockets.sockets.values()) {
             if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
@@ -164,6 +173,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
           const result = manager.transition(route.endsWith("/start") ? "buzzing" : "ended");
           if (!result.ok || activity === undefined) { sendJson(response, 409, { error: "invalid-transition" }); return; }
           const io = socketServer;
+          broadcastScreenView(io, activity);
           for (const client of io.sockets.sockets.values()) {
             if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
@@ -177,6 +187,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
           const activity = manager.getActive();
           if (activity === undefined || typeof body.visible !== "boolean") { sendJson(response, 409, { error: "invalid-request" }); return; }
           activity.showQuestionDescriptions = body.visible;
+          broadcastScreenView(socketServer, activity);
           for (const client of socketServer.sockets.sockets.values()) {
             if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
               const view = createStudentView(activity, client.data.studentIdentity.groupId);
