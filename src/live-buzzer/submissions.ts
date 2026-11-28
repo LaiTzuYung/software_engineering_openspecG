@@ -1,4 +1,4 @@
-import type { ActivityState, AcceptedSubmission } from "./model.ts";
+import type { ActivityState, AcceptedSubmission, RankingRule } from "./model.ts";
 
 export type SubmissionRejectionReason =
   | "activity-not-buzzing"
@@ -19,8 +19,6 @@ export interface QuestionResult {
   readonly answers: Readonly<Record<number, string>> | null;
   readonly sequence: number | null;
 }
-
-export type RankingRule = "speed" | "cap";
 
 export interface RankedSubmissionResult {
   readonly submission: AcceptedSubmission;
@@ -118,8 +116,8 @@ export function submitAnswers(
   return { accepted: true, submission };
 }
 
-/** Returns the first accepted group for each question, with no client timestamps. */
-export function getQuestionResults(activity: ActivityState): readonly QuestionResult[] {
+/** Preserves the original pure-speed outcome for the unified calculator's speed branch. */
+function getPureSpeedQuestionResults(activity: ActivityState): readonly QuestionResult[] {
   return activity.questionSet.questions.map((question) => {
     const accepted = activity.submissions.get(question.number);
     let first: AcceptedSubmission | undefined;
@@ -142,10 +140,20 @@ export function getQuestionResults(activity: ActivityState): readonly QuestionRe
   });
 }
 
+/** Returns existing result fields, with the activity's selected rule applied by the shared calculator. */
+export function getQuestionResults(activity: ActivityState): readonly QuestionResult[] {
+  return calculateRankingResults(activity).questions.map(({ explanation: _explanation, ...result }) => result);
+}
+
+/** Returns the cap derived from all questions in the activity, whether submitted or not. */
+export function getRankingCap(questionCount: number, groupCount: number): number {
+  return Math.ceil(questionCount / groupCount);
+}
+
 /** Recomputes all question outcomes in server-sequence order without mutating the activity. */
 export function calculateRankingResults(
   activity: ActivityState,
-  rule: RankingRule = "speed",
+  rule: RankingRule = activity.rankingRule,
 ): RankingResults {
   const ranksByQuestion = new Map<number, ReadonlyMap<string, number>>();
   const acceptedSubmissions: AcceptedSubmission[] = [];
@@ -156,7 +164,7 @@ export function calculateRankingResults(
   acceptedSubmissions.sort((left, right) => left.sequence - right.sequence);
 
   if (rule === "speed") {
-    const currentResults = getQuestionResults(activity);
+    const currentResults = getPureSpeedQuestionResults(activity);
     const successfulGroupByQuestion = new Map(
       currentResults.map(({ questionNumber, successfulGroup }) => [questionNumber, successfulGroup?.id]),
     );
@@ -180,7 +188,7 @@ export function calculateRankingResults(
     };
   }
 
-  const cap = Math.ceil(activity.questionSet.questions.length / activity.groups.length);
+  const cap = getRankingCap(activity.questionSet.questions.length, activity.groups.length);
   const successfulCountByGroup = new Map<string, number>();
   const winnerByQuestion = new Map<number, AcceptedSubmission>();
   const skippedGroupsByQuestion = new Map<number, string[]>();

@@ -268,9 +268,12 @@ test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘�
       method: "POST", headers: teacherHeaders(), body: JSON.stringify({ questionSetId: "seed-set" }),
     });
     assert.equal(createdResponse.status, 201);
-    const created = await createdResponse.json() as { activity: { activityCode: string; stage: string; groups: unknown[] } };
+    const created = await createdResponse.json() as {
+      activity: { activityCode: string; stage: string; groups: unknown[]; rankingRule: { name: string; explanation: string } };
+    };
     assert.match(created.activity.activityCode, /^\d{4}$/u);
     assert.equal(created.activity.stage, "preparing");
+    assert.deepEqual(created.activity.rankingRule, { name: "純速度", explanation: "" });
     assert.equal((created.activity as { canWriteSpreadsheet?: boolean }).canWriteSpreadsheet, false);
     assert.equal((created.activity as { questionSetSource?: string }).questionSetSource, "legacy");
     assert.equal(created.activity.groups.length, 4);
@@ -287,6 +290,45 @@ test("老師頁 HTTP 流程可建立活動、開始／結束、切換題目敘�
     assert.equal((await fetch(`${base}/api/teacher/end`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);
     const afterEnd = (await (await fetch(`${base}/api/teacher/view`, { headers: teacherHeaders() })).json()) as { activity: { stage: string } };
     assert.equal(afterEnd.activity.stage, "ended");
+  });
+});
+
+test("HTTP 建立與更新排名規則，並在搶答開始或結束後拒絕更改", async () => {
+  await withServer(async (base, _directory, app) => {
+    const unauthorized = await fetch(`${base}/api/teacher/ranking-rule`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rankingRule: "cap" }),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const createdResponse = await fetch(`${base}/api/teacher/activity`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ questionSetId: "seed-set", rankingRule: "cap" }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { activity: { rankingRule: { name: string; explanation: string } } };
+    assert.deepEqual(created.activity.rankingRule, { name: "均分上限", explanation: "每組最多成功 1 題" });
+    assert.equal(app.manager.getActive()?.rankingRule, "cap");
+
+    const preparingUpdate = await fetch(`${base}/api/teacher/ranking-rule`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ rankingRule: "speed" }),
+    });
+    assert.equal(preparingUpdate.status, 200);
+    assert.equal(app.manager.getActive()?.rankingRule, "speed");
+
+    assert.equal((await fetch(`${base}/api/teacher/start`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);
+    const buzzingUpdate = await fetch(`${base}/api/teacher/ranking-rule`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ rankingRule: "cap" }),
+    });
+    assert.equal(buzzingUpdate.status, 409);
+    assert.deepEqual(await buzzingUpdate.json(), { error: "搶答開始後不能更改排名規則" });
+    assert.equal(app.manager.getActive()?.rankingRule, "speed");
+
+    assert.equal((await fetch(`${base}/api/teacher/end`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);
+    const endedUpdate = await fetch(`${base}/api/teacher/ranking-rule`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ rankingRule: "cap" }),
+    });
+    assert.equal(endedUpdate.status, 409);
+    assert.deepEqual(await endedUpdate.json(), { error: "搶答開始後不能更改排名規則" });
+    assert.equal(app.manager.getActive()?.rankingRule, "speed");
   });
 });
 
@@ -459,7 +501,7 @@ test("HTTP 學生視圖在活動進行中及結束後只包含本組已提交答
         const ownAnswers = JSON.stringify(view.questions.flatMap(({ subquestions }) => subquestions.map(({ answer }) => answer)));
         assert.equal(ownAnswers.includes("SECRET-ANSWER-B"), false);
         assert.equal(JSON.stringify(view).includes("group-2"), false);
-        assert.equal(JSON.stringify(view).includes("rank"), false);
+        assert.doesNotMatch(JSON.stringify(view), /"(?:rank|originalRank|finalRank)"\s*:/u);
         assert.equal(JSON.stringify(view).includes("sequence"), false);
         assert.equal(JSON.stringify(view).includes("987654"), false);
       } else {
@@ -470,7 +512,7 @@ test("HTTP 學生視圖在活動進行中及結束後只包含本組已提交答
         }]);
         const ownAnswers = view.questions.flatMap(({ subquestions }) => subquestions.map(({ answer }) => answer));
         assert.deepEqual(ownAnswers, ["TEAM-A-ANSWER"]);
-        assert.equal(JSON.stringify(view).includes("rank"), false);
+        assert.doesNotMatch(JSON.stringify(view), /"(?:rank|originalRank|finalRank)"\s*:/u);
         assert.equal(JSON.stringify(view).includes("sequence"), false);
         assert.equal(JSON.stringify(view).includes("987654"), false);
       }

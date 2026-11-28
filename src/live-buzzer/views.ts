@@ -1,5 +1,10 @@
-import type { ActivityState, ActivityStage } from "./model.ts";
-import { getQuestionRanks, getQuestionResults } from "./submissions.ts";
+import type { ActivityState, ActivityStage, RankingRule } from "./model.ts";
+import { getQuestionRanks, getQuestionResults, getRankingCap } from "./submissions.ts";
+
+export interface RankingRuleView {
+  readonly name: "純速度" | "均分上限";
+  readonly explanation: string;
+}
 
 export interface StudentSubquestionView {
   readonly number: number;
@@ -28,6 +33,7 @@ export interface StudentView {
   readonly activityCode: string;
   readonly stage: ActivityStage;
   readonly group: { readonly id: string; readonly name: string };
+  readonly rankingRule: RankingRuleView;
   readonly questionDescriptionsVisible: boolean;
   readonly questions: readonly StudentQuestionView[];
   readonly results: readonly StudentResultView[] | null;
@@ -43,6 +49,7 @@ export interface TeacherView {
   readonly stage: ActivityStage;
   readonly canWriteSpreadsheet: boolean;
   readonly questionSetSource: "google" | "xlsx" | "legacy";
+  readonly rankingRule: RankingRuleView;
   readonly questionDescriptionsVisible: boolean;
   readonly groups: readonly {
     readonly id: string;
@@ -89,6 +96,7 @@ export function createStudentView(activity: ActivityState, groupId: string): Stu
     activityCode: activity.activityCode,
     stage: activity.stage,
     group: { id: group.id, name: group.name },
+    rankingRule: createRankingRuleView(activity.rankingRule, activity.questionSet.questions.length, activity.groups.length),
     questionDescriptionsVisible: activity.showQuestionDescriptions,
     questions,
     results: activity.stage === "ended" ? createStudentResults(activity) : null,
@@ -153,10 +161,16 @@ export function createTeacherView(
     stage: activity.stage,
     canWriteSpreadsheet: activity.questionSet.googleSource !== undefined,
     questionSetSource: activity.questionSet.googleSource !== undefined ? "google" : activity.questionSet.importSource ?? "legacy",
+    rankingRule: createRankingRuleView(activity.rankingRule, activity.questionSet.questions.length, activity.groups.length),
     questionDescriptionsVisible: activity.showQuestionDescriptions,
     groups,
     questions,
   };
+}
+
+function createRankingRuleView(rule: RankingRule, questionCount: number, groupCount: number): RankingRuleView {
+  if (rule === "speed") return { name: "純速度", explanation: "" };
+  return { name: "均分上限", explanation: `每組最多成功 ${getRankingCap(questionCount, groupCount)} 題` };
 }
 
 function createStudentResults(activity: ActivityState): readonly StudentResultView[] {

@@ -7,7 +7,7 @@ import { GuidedNotesImportService } from "../guided-notes/import-service.ts";
 import { createGoogleSheetsReader, createGoogleSheetsWriter } from "../guided-notes/google-sheets-adapter.ts";
 import { SpreadsheetExportPreviewService, SpreadsheetExportWriteError } from "../guided-notes/spreadsheet-export-validation.ts";
 import { createPreviewFromInput } from "../cli.ts";
-import { ActivityManager, transitionActivityStage } from "./model.ts";
+import { ActivityManager, transitionActivityStage, type RankingRule } from "./model.ts";
 import { QuestionSetRepository } from "./question-sets.ts";
 import { countOnlineStudentPages, createLiveBuzzerSocketServer } from "./socket-server.ts";
 import { createStudentStatusResponse, createStudentView, createTeacherView } from "./views.ts";
@@ -66,6 +66,10 @@ function cookiePin(request: IncomingMessage): string | undefined {
 
 function safeEqual(actual: string | undefined, expected: string): boolean {
   return actual === expected;
+}
+
+function isRankingRule(value: unknown): value is RankingRule {
+  return value === "speed" || value === "cap";
 }
 
 function readPin(request: IncomingMessage): string | undefined {
@@ -129,12 +133,35 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
         if (method === "POST" && route === "/api/teacher/activity") {
           const body = await readJson(request);
           if (typeof body.questionSetId !== "string") { sendJson(response, 400, { error: "invalid-request" }); return; }
+          const rankingRule = body.rankingRule === undefined ? "speed" : body.rankingRule;
+          if (!isRankingRule(rankingRule)) { sendJson(response, 400, { error: "invalid-request" }); return; }
           const set = await repository.get(body.questionSetId);
           if (set === undefined) { sendJson(response, 404, { error: "question-set-not-found" }); return; }
           const groupNames = Array.isArray(body.groupNames) && body.groupNames.every((name) => typeof name === "string")
             ? body.groupNames as string[] : undefined;
-          const activity = manager.create(set, groupNames === undefined ? {} : { groupNames });
+          const activity = manager.create(set, {
+            ...(groupNames === undefined ? {} : { groupNames }),
+            rankingRule,
+          });
           sendJson(response, 201, { activity: teacherActivityView(activity, socketServer) }); return;
+        }
+        if (method === "POST" && route === "/api/teacher/ranking-rule") {
+          const body = await readJson(request);
+          if (!isRankingRule(body.rankingRule)) { sendJson(response, 400, { error: "invalid-request" }); return; }
+          const result = manager.setRankingRule(body.rankingRule);
+          if (!result.ok) {
+            sendJson(response, 409, { error: result.reason === "ranking-rule-locked" ? result.message : "activity-unavailable" }); return;
+          }
+          const activity = manager.getActive()!;
+          for (const client of socketServer.sockets.sockets.values()) {
+            if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
+              const view = createStudentView(activity, client.data.studentIdentity.groupId);
+              if (view !== undefined) client.emit("activity:student-view", view);
+            } else if (client.data.role === "teacher") {
+              client.emit("activity:teacher-view", teacherActivityView(activity, socketServer));
+            }
+          }
+          sendJson(response, 200, { activity: teacherActivityView(activity, socketServer) }); return;
         }
         if (method === "POST" && (route === "/api/teacher/start" || route === "/api/teacher/end")) {
           const activity = manager.getActive();

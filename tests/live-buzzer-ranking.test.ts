@@ -180,3 +180,18 @@ test("純速度結果與既有 getQuestionRanks、getQuestionResults 完全相�
     assert.equal(rankedSubmission.skipped, false);
   }
 });
+
+test("既有 getQuestionResults 呼叫點依活動規則使用統一計算器", () => {
+  const activity = activityFor(["single", "single"], ["第 1 組", "第 2 組"]);
+  activity.rankingRule = "cap";
+  submit(activity, "group-1", 2);
+  submit(activity, "group-1", 1);
+  submit(activity, "group-2", 1);
+
+  assert.deepEqual(getQuestionResults(activity).map(({ questionNumber, successfulGroup }) => [
+    questionNumber, successfulGroup?.name ?? null,
+  ]), [
+    [1, "第 2 組"],
+    [2, "第 1 組"],
+  ]);
+});

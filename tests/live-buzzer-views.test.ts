@@ -48,6 +48,21 @@ test("student view uses an explicit allowlist and excludes other groups' answers
   assert.equal(payload.includes("onlineStudentPages"), false);
 });
 
+test("均分上限學生 view 公開規則名稱與說明，但搶答中不含跳過、順位、成敗或他組資料", () => {
+  const activity = createActivityState(questionSet(), { activityCode: "2468", rankingRule: "cap" });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-2", 7, { 1: "SECRET-ANSWER-B", 2: "SECOND-SECRET-B" });
+
+  const view = createStudentView(activity, "group-1");
+  assert.ok(view);
+  assert.deepEqual(view.rankingRule, { name: "均分上限", explanation: "每組最多成功 1 題" });
+  assert.equal(view.results, null);
+  const payload = JSON.stringify(view);
+  for (const forbidden of ["SECRET-ANSWER-B", "SECOND-SECRET-B", "group-2", "第 2 組", '"rank"', '"originalRank"', '"finalRank"', '"sequence"', '"skipped"', '"successful"']) {
+    assert.equal(payload.includes(forbidden), false, `不應包含 ${forbidden}`);
+  }
+});
+
 test("student view includes question descriptions only when enabled and rejects unknown groups", () => {
   const activity = createActivityState(questionSet(), { activityCode: "2468" });
   assert.equal(createStudentView(activity, "missing-group"), undefined);
@@ -77,7 +92,7 @@ test("ended student view preserves successful-group results while own answers re
       assert.equal(payload.includes("SECOND-SECRET-B"), false);
       assert.equal(payload.includes("group-2"), false);
       assert.equal(payload.includes("第 2 組"), false);
-      assert.equal(payload.includes("rank"), false);
+      assert.doesNotMatch(payload, /"(?:rank|originalRank|finalRank)"\s*:/u);
       assert.equal(payload.includes("sequence"), false);
     } else {
       assert.deepEqual(view?.results, [{

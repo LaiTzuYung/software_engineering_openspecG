@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from "node:http";
 import { Server, type Socket } from "socket.io";
-import type { ActivityManager, ActivityState } from "./model.ts";
+import type { ActivityManager, ActivityState, RankingRule } from "./model.ts";
 import { submitAnswers } from "./submissions.ts";
 import { createStudentView, createTeacherView } from "./views.ts";
 
@@ -40,6 +40,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isAnswerMap(value: unknown): value is Readonly<Record<number, string>> {
   if (!isRecord(value)) return false;
   return Object.values(value).every((answer) => typeof answer === "string");
+}
+
+function isRankingRule(value: unknown): value is RankingRule {
+  return value === "speed" || value === "cap";
 }
 
 function getActiveActivity(manager: ActivityManager): ActivityState | undefined {
@@ -205,6 +209,25 @@ export function createLiveBuzzerSocketServer(
       }
       const activity = getActiveActivity(manager)!;
       acknowledge(callback, { ok: true, stage: activity.stage });
+      broadcastStudentViews(io, activity);
+      broadcastTeacherView(io, activity);
+    });
+
+    socket.on("teacher:set-ranking-rule", (payload: unknown, callback: unknown) => {
+      if (rejectTeacherAction(socket, callback)) return;
+      if (!isRankingRule(payload)) {
+        acknowledge(callback, { ok: false, reason: "invalid-request" });
+        return;
+      }
+      const result = manager.setRankingRule(payload);
+      if (!result.ok) {
+        acknowledge(callback, result.reason === "ranking-rule-locked"
+          ? { ok: false, reason: result.reason, message: result.message }
+          : { ok: false, reason: result.reason });
+        return;
+      }
+      const activity = getActiveActivity(manager)!;
+      acknowledge(callback, { ok: true, rankingRule: result.rankingRule });
       broadcastStudentViews(io, activity);
       broadcastTeacherView(io, activity);
     });
