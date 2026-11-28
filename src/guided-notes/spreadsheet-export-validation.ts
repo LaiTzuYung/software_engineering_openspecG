@@ -52,6 +52,22 @@ export interface SpreadsheetExportRestoreResult {
   readonly message?: string;
 }
 
+export interface SpreadsheetExportRestoreTarget {
+  readonly questionNumber: number;
+  readonly subquestionNumber: number;
+  readonly cell: PreviewCell;
+  readonly currentValue: CellValue;
+  readonly originalValue: CellValue;
+  readonly lastWrittenValue: CellValue;
+  readonly status: "將還原" | "已被手動修改";
+}
+
+export interface SpreadsheetExportRestorePreview {
+  readonly id: string;
+  readonly targets: readonly SpreadsheetExportRestoreTarget[];
+  readonly message?: string;
+}
+
 interface SpreadsheetExportBackup {
   readonly id: string;
   readonly createdAt: string;
@@ -67,6 +83,106 @@ interface SpreadsheetExportBackup {
     readonly originalValue: CellValue;
     readonly writtenValue: CellValue;
   }[];
+}
+
+interface StoredRestorePreview {
+  readonly questionSet: GuidedNotesQuestionSet;
+  readonly activityCode: string;
+  readonly spreadsheetId: string;
+  readonly gid?: number;
+  readonly targets: readonly (SpreadsheetExportRestoreTarget & { readonly snapshotValue: CellValue })[];
+}
+
+interface ActivityCellBackup {
+  readonly questionNumber: number;
+  readonly subquestionNumber: number;
+  readonly sheetName: string;
+  readonly address: string;
+  readonly originalValue: CellValue;
+  readonly writtenValue: CellValue;
+}
+
+interface ValidBackup {
+  readonly path: string;
+  readonly value: SpreadsheetExportBackup;
+}
+
+function isCellValue(value: unknown): value is CellValue {
+  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+function isSpreadsheetExportBackup(value: unknown): value is SpreadsheetExportBackup {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || typeof record.createdAt !== "string" ||
+      !["pending", "succeeded", "failed"].includes(String(record.status)) ||
+      typeof record.spreadsheetId !== "string" || typeof record.activityCode !== "string" ||
+      (record.gid !== undefined && typeof record.gid !== "number") || !Array.isArray(record.targets)) return false;
+  return record.targets.every((item: unknown) => {
+    if (typeof item !== "object" || item === null) return false;
+    const target = item as Record<string, unknown>;
+    return typeof target.questionNumber === "number" && typeof target.subquestionNumber === "number" &&
+      typeof target.sheetName === "string" && typeof target.address === "string" &&
+      isCellValue(target.originalValue) && isCellValue(target.writtenValue);
+  });
+}
+
+async function readBackupFiles(backupDirectory: string): Promise<ValidBackup[]> {
+  let names: string[];
+  try { names = await readdir(backupDirectory); }
+  catch (error) { if (isMissingDirectory(error)) return []; throw error; }
+  const backups: ValidBackup[] = [];
+  for (const name of names.filter((item) => item.endsWith(".json"))) {
+    const backupPath = path.join(backupDirectory, name);
+    try {
+      const value: unknown = JSON.parse(await readFile(backupPath, "utf8"));
+      if (isSpreadsheetExportBackup(value)) backups.push({ path: backupPath, value });
+    } catch { /* Legacy and interrupted files are ignored unless their full shape is valid. */ }
+  }
+  return backups.sort((left, right) => left.value.createdAt.localeCompare(right.value.createdAt) || left.value.id.localeCompare(right.value.id));
+}
+
+async function activityBackups(
+  backupDirectory: string,
+  source: GoogleSpreadsheetSource,
+  activityCode: string,
+): Promise<ValidBackup[]> {
+  return (await readBackupFiles(backupDirectory)).filter(({ value }) =>
+    value.status === "succeeded" && value.activityCode === activityCode &&
+    value.spreadsheetId === source.spreadsheetId && value.gid === source.gid);
+}
+
+function cellBackupKey(cell: Pick<ActivityCellBackup, "sheetName" | "address">): string {
+  return `${cell.sheetName}!${cell.address}`;
+}
+
+function originalValueForTarget(
+  prior: ActivityCellBackup | undefined,
+  markerOriginalValue: CellValue | undefined,
+  currentValue: CellValue,
+): CellValue {
+  if (prior !== undefined) return prior.originalValue;
+  return markerOriginalValue === undefined ? currentValue : markerOriginalValue;
+}
+
+function q7LabelPrefix(value: CellValue): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return /^\s*[（(]\s*\d+\s*[）)]/u.exec(value)?.[0];
+}
+
+function aggregateActivityCells(backups: readonly ValidBackup[]): Map<string, ActivityCellBackup> {
+  const cells = new Map<string, ActivityCellBackup>();
+  for (const { value } of backups) {
+    for (const target of value.targets) {
+      const key = cellBackupKey(target);
+      const previous = cells.get(key);
+      cells.set(key, {
+        ...target,
+        originalValue: previous === undefined ? target.originalValue : previous.originalValue,
+      });
+    }
+  }
+  return cells;
 }
 
 export class SpreadsheetExportWriteError extends Error {
@@ -299,6 +415,7 @@ interface StoredPreview {
 export class SpreadsheetExportPreviewService {
   private readonly readSpreadsheet: (url: string) => Promise<GridSheet>;
   private readonly pending = new Map<string, StoredPreview>();
+  private readonly pendingRestores = new Map<string, StoredRestorePreview>();
 
   constructor(readSpreadsheet: (url: string) => Promise<GridSheet>) {
     this.readSpreadsheet = readSpreadsheet;
@@ -330,9 +447,15 @@ export class SpreadsheetExportPreviewService {
       const template = questionSet.answerMarkerTemplates?.find((item) =>
         item.questionNumber === answer.questionNumber && item.subquestionNumber === answer.subquestionNumber &&
         item.answerCell.address === cell.address && item.answerCell.sheetName === cell.sheetName);
-      const writtenValue = template === undefined
-        ? answer.answer
-        : replaceAnswerMarkers(template.originalValue, answer.answer);
+      const labelIsAnswerCell = subquestion.labelCell !== undefined &&
+        subquestion.labelCell.sheetName === subquestion.answerCell.sheetName &&
+        subquestion.labelCell.row === subquestion.answerCell.row &&
+        subquestion.labelCell.column === subquestion.answerCell.column;
+      const writtenValue = template !== undefined
+        ? replaceAnswerMarkers(template.originalValue, answer.answer)
+        : labelIsAnswerCell
+          ? `${q7LabelPrefix(currentValue) ?? String(currentValue ?? "")}${answer.answer}`
+          : answer.answer;
       return {
         questionNumber: answer.questionNumber,
         subquestionNumber: answer.subquestionNumber,
@@ -387,6 +510,10 @@ export class SpreadsheetExportPreviewService {
     const targets = preview.targets.filter(({ status }) => status === "將寫入");
     if (targets.length === 0) return { preview, updatedCells: 0 };
 
+    const previousCells = source === undefined
+      ? new Map<string, ActivityCellBackup>()
+      : aggregateActivityCells(await activityBackups(backupDirectory, source, activityCode));
+
     const backupPath = path.join(backupDirectory, `export-${randomUUID()}.json`);
     const backup = {
       id: path.basename(backupPath, ".json"),
@@ -400,9 +527,13 @@ export class SpreadsheetExportPreviewService {
         subquestionNumber: target.subquestionNumber,
         sheetName: target.cell.sheetName,
         address: target.cell.address,
-        originalValue: stored?.questionSet.answerMarkerTemplates?.find((template) =>
+        originalValue: originalValueForTarget(
+          previousCells.get(`${target.cell.sheetName}!${target.cell.address}`),
+          stored?.questionSet.answerMarkerTemplates?.find((template) =>
           template.questionNumber === target.questionNumber && template.subquestionNumber === target.subquestionNumber &&
-          template.answerCell.address === target.cell.address)?.originalValue ?? target.currentValue,
+          template.answerCell.address === target.cell.address)?.originalValue,
+          target.currentValue,
+        ),
         writtenValue: target.answer,
       })),
     };
@@ -426,87 +557,102 @@ export class SpreadsheetExportPreviewService {
     }
   }
 
-  async restoreLatest(
+  async createRestorePreview(
     questionSet: GuidedNotesQuestionSet,
+    activityCode: string,
+    backupDirectory = path.join(process.cwd(), "data", "spreadsheet-export-backups"),
+  ): Promise<SpreadsheetExportRestorePreview> {
+    const source = questionSet.googleSource;
+    if (source === undefined) throw new SpreadsheetStructureMismatchError("題目集沒有 Google 試算表來源資訊，無法還原。");
+    const cells = aggregateActivityCells(await activityBackups(backupDirectory, source, activityCode));
+    if (cells.size === 0) return { id: randomUUID(), targets: [], message: "沒有可還原的成功回寫紀錄。" };
+
+    const { sheet, parsed } = await readAndCompare(questionSet, this.readSpreadsheet);
+    const targets: (SpreadsheetExportRestoreTarget & { snapshotValue: CellValue })[] = [];
+    for (const record of cells.values()) {
+      const subquestion = findSubquestion(parsed, record.questionNumber, record.subquestionNumber);
+      const address = `${record.sheetName}!${record.address}`;
+      if (subquestion === undefined || subquestion.answerCell.sheetName !== record.sheetName ||
+          toPreviewCell(subquestion.answerCell).address !== record.address) {
+        throw new SpreadsheetStructureMismatchError(`目前作答格位置與備份不一致：${address}。請重新匯入題目集後再還原。`);
+      }
+      const currentValue = getCellValue(sheet, subquestion.answerCell.row, subquestion.answerCell.column);
+      targets.push({
+        questionNumber: record.questionNumber,
+        subquestionNumber: record.subquestionNumber,
+        cell: toPreviewCell(subquestion.answerCell),
+        currentValue,
+        originalValue: record.originalValue,
+        lastWrittenValue: record.writtenValue,
+        status: currentValue === record.writtenValue ? "將還原" : "已被手動修改",
+        snapshotValue: currentValue,
+      });
+    }
+    targets.sort((left, right) => left.cell.sheetName.localeCompare(right.cell.sheetName) ||
+      left.cell.row - right.cell.row || left.cell.column - right.cell.column);
+    const id = randomUUID();
+    const preview: SpreadsheetExportRestorePreview = { id, targets: targets.map(({ snapshotValue: _snapshot, ...target }) => target) };
+    this.pendingRestores.set(id, {
+      questionSet: structuredClone(questionSet),
+      activityCode,
+      spreadsheetId: source.spreadsheetId,
+      ...(source.gid === undefined ? {} : { gid: source.gid }),
+      targets: structuredClone(targets),
+    });
+    return preview;
+  }
+
+  async confirmRestore(
+    previewId: string,
+    activityCode: string,
     readSpreadsheet: (url: string) => Promise<GridSheet>,
     writeRawValues: (spreadsheetId: string, data: readonly GoogleSheetsValueRange[]) => Promise<number>,
     backupDirectory = path.join(process.cwd(), "data", "spreadsheet-export-backups"),
   ): Promise<SpreadsheetExportRestoreResult> {
-    const source = questionSet.googleSource;
-    if (source === undefined) throw new SpreadsheetStructureMismatchError("題目集沒有 Google 試算表來源資訊，無法還原。");
-    let names: string[];
-    try {
-      names = await readdir(backupDirectory);
-    } catch (error) {
-      if (isMissingDirectory(error)) {
-        return { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" };
-      }
-      throw error;
+    const stored = this.pendingRestores.get(previewId);
+    if (stored === undefined) throw new SpreadsheetStructureMismatchError("找不到有效的還原預覽，請重新產生還原預覽。");
+    this.pendingRestores.delete(previewId);
+    if (stored.activityCode !== activityCode) throw new SpreadsheetStructureMismatchError("還原預覽不屬於目前活動，請重新產生還原預覽。");
+    const source = stored.questionSet.googleSource;
+    if (source === undefined || source.spreadsheetId !== stored.spreadsheetId || source.gid !== stored.gid) {
+      throw new SpreadsheetStructureMismatchError("還原預覽的試算表來源已改變，請重新產生還原預覽。");
     }
-    const backups: { path: string; value: SpreadsheetExportBackup }[] = [];
-    for (const name of names.filter((item) => item.endsWith(".json"))) {
-      const backupPath = path.join(backupDirectory, name);
-      try {
-        const value = JSON.parse(await readFile(backupPath, "utf8")) as SpreadsheetExportBackup;
-        if (value.status === "succeeded" && value.spreadsheetId === source.spreadsheetId && value.gid === source.gid && Array.isArray(value.targets)) {
-          backups.push({ path: backupPath, value });
-        }
-      } catch { /* Ignore incomplete or malformed backup files. */ }
-    }
-    backups.sort((left, right) => right.value.createdAt.localeCompare(left.value.createdAt));
-    const latest = backups[0];
-    if (latest === undefined) return { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" };
+    if (stored.targets.length === 0) return { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" };
 
-    const { sheet, parsed } = await readAndCompare(questionSet, readSpreadsheet);
-    const restored: { address: string }[] = [];
-    const skipped: { address: string; reason: string; currentValue: CellValue; expectedValue: CellValue }[] = [];
-    const candidates: { address: string; sheetName: string; cellAddress: string; row: number; column: number; originalValue: CellValue }[] = [];
-    const data: GoogleSheetsValueRange[] = [];
-    for (const target of latest.value.targets) {
+    const { sheet, parsed } = await readAndCompare(stored.questionSet, readSpreadsheet);
+    const resolved: { target: StoredRestorePreview["targets"][number]; row: number; column: number }[] = [];
+    for (const target of stored.targets) {
       const subquestion = findSubquestion(parsed, target.questionNumber, target.subquestionNumber);
-      const address = `${target.sheetName}!${target.address}`;
-      if (subquestion === undefined || subquestion.answerCell.sheetName !== target.sheetName ||
-          toPreviewCell(subquestion.answerCell).address !== target.address) {
-        skipped.push({ address, reason: "目前作答格位置與備份不一致。", currentValue: null, expectedValue: target.writtenValue });
-        continue;
+      if (subquestion === undefined || subquestion.answerCell.sheetName !== target.cell.sheetName ||
+          toPreviewCell(subquestion.answerCell).address !== target.cell.address) {
+        throw new SpreadsheetStructureMismatchError(`還原作答格 ${cellLocation(target.cell)} 位置已改變，請重新產生還原預覽。`);
       }
       const currentValue = getCellValue(sheet, subquestion.answerCell.row, subquestion.answerCell.column);
-      if (currentValue !== target.writtenValue) {
-        skipped.push({ address, reason: "目前內容與當次回寫值不同，為避免覆蓋後續修改而跳過。", currentValue, expectedValue: target.writtenValue });
-        continue;
+      if (currentValue !== target.snapshotValue) {
+        throw new SpreadsheetStructureMismatchError(`還原預覽後試算表內容已改變（${cellLocation(target.cell)}），請重新產生還原預覽。`);
       }
-      data.push({
-        range: `'${target.sheetName.replace(/'/gu, "''")}'!${target.address}`,
-        values: [[target.originalValue === null ? "" : target.originalValue]],
-      });
-      candidates.push({
-        address, sheetName: target.sheetName, cellAddress: target.address,
-        row: subquestion.answerCell.row, column: subquestion.answerCell.column,
-        originalValue: target.originalValue,
-      });
+      resolved.push({ target, row: subquestion.answerCell.row, column: subquestion.answerCell.column });
     }
-    const failed: { address: string; reason: string; actualValue: CellValue; expectedValue: CellValue }[] = [];
-    if (data.length > 0) {
-      await writeRawValues(source.spreadsheetId, data);
-      const afterRestore = await readSpreadsheet(sourceUrl(source));
-      for (const candidate of candidates) {
-        const actualValue = getCellValue(afterRestore, candidate.row, candidate.column);
-        const actualBlank = actualValue === null || actualValue === "";
-        const expectedBlank = candidate.originalValue === null || candidate.originalValue === "";
-        if ((actualBlank && expectedBlank) || actualValue === candidate.originalValue) {
-          restored.push({ address: candidate.address });
-        } else {
-          failed.push({
-            address: candidate.address,
-            reason: "還原後重新讀取的內容與備份原值不同。",
-            actualValue,
-            expectedValue: candidate.originalValue,
-          });
-        }
-      }
+
+    const ranges: GoogleSheetsValueRange[] = resolved.map(({ target }) => ({
+      range: `'${target.cell.sheetName.replace(/'/gu, "''")}'!${target.cell.address}`,
+      values: [[target.originalValue === null ? "" : target.originalValue]],
+    }));
+    await writeRawValues(source.spreadsheetId, ranges);
+    const afterRestore = await readSpreadsheet(sourceUrl(source));
+    const restored: { address: string }[] = [];
+    const failed: SpreadsheetExportRestoreResult["failed"][number][] = [];
+    for (const { target, row, column } of resolved) {
+      const actualValue = getCellValue(afterRestore, row, column);
+      const actualBlank = actualValue === null || actualValue === "";
+      const expectedBlank = target.originalValue === null || target.originalValue === "";
+      const address = cellLocation(target.cell);
+      if ((actualBlank && expectedBlank) || actualValue === target.originalValue) restored.push({ address });
+      else failed.push({ address, reason: "還原後重新讀取的內容與備份原值不同。", actualValue, expectedValue: target.originalValue });
     }
-    return { backupPath: latest.path, restored, skipped, failed };
+    return { restored, skipped: [], failed };
   }
+
 }
 
 function isMissingDirectory(error: unknown): boolean {

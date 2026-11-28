@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { screenPage, studentPage, teacherLoginPage, teacherPage } from "../src/live-buzzer/pages.ts";
 
-function createTeacherPageHarness() {
+function createTeacherPageHarness(fetchImpl: (url: string, ...args: any[]) => Promise<any> = () => new Promise(() => {})) {
   const elements = new Map<string, any>();
   const ioCalls: unknown[] = [];
   const socketHandlers = new Map<string, (payload: unknown) => void>();
@@ -28,14 +28,14 @@ function createTeacherPageHarness() {
   const socket = {
     on(event: string, handler: (payload: unknown) => void) { socketHandlers.set(event, handler); return this; },
   };
-  const runtime = new Function("document", "io", "sessionStorage", "fetch", "Option", `${script};return {show,renderImportPreview,renderExportPreview};`)(
+  const runtime = new Function("document", "io", "sessionStorage", "fetch", "Option", `${script};return {show,renderImportPreview,renderExportPreview,renderRestorePreview};`)(
     document,
     (options: unknown) => { ioCalls.push(options); return socket; },
     { getItem() { return "test-pin"; } },
-    () => new Promise(() => {}),
+    fetchImpl,
     class Option {},
-  ) as { show: (view: unknown) => void; renderImportPreview: (preview: unknown) => void; renderExportPreview: (preview: unknown) => void };
-  return { elements, ioCalls, socketHandlers, show: runtime.show, renderImportPreview: runtime.renderImportPreview, renderExportPreview: runtime.renderExportPreview };
+  ) as { show: (view: unknown) => void; renderImportPreview: (preview: unknown) => void; renderExportPreview: (preview: unknown) => void; renderRestorePreview: (preview: unknown) => void };
+  return { elements, ioCalls, socketHandlers, show: runtime.show, renderImportPreview: runtime.renderImportPreview, renderExportPreview: runtime.renderExportPreview, renderRestorePreview: runtime.renderRestorePreview };
 }
 
 test("匯入摘要與回寫預覽都顯示定位方式及標記替換值", () => {
@@ -57,6 +57,10 @@ test("teacher and student pages render ranking controls, results and no-success 
   assert.match(teacherPage, /原始順位：/u);
   assert.match(teacherPage, /最終順位：/u);
   assert.match(teacherPage, /data\.stage==='preparing'/u);
+  assert.match(teacherPage, /id="export-restore-button"[^>]*>還原預覽/u);
+  assert.match(teacherPage, /id="export-restore-confirm-button"[^>]*>確認還原/u);
+  assert.match(teacherPage, /\.restore-will\{[^}]*background:/u);
+  assert.match(teacherPage, /\.restore-manual\{[^}]*background:/u);
   assert.match(studentPage, /排名規則：/u);
   assert.match(studentPage, /result\.explanation/u);
   assert.match(studentPage, /view\.stage==='ended'/u);
@@ -88,11 +92,37 @@ test("teacher login stores the PIN and the teacher page connects on load, handle
     ["#descriptions", "onchange"], ["#preview", "onclick"], ["#confirm", "onclick"],
     ["#export-preview-button", "onclick"], ["#export-confirm-button", "onclick"],
     ["#export-restore-button", "onclick"], ["#export-csv-button", "onclick"],
+    ["#export-restore-confirm-button", "onclick"],
   ]) assert.equal(typeof firstLoad.elements.get(id)?.[event], "function", `${id} ${event} should remain registered`);
   assert.match(teacherPage, /refreshSets\(\)\.then\(\(\)=>api\('\/api\/teacher\/view'\)\)\.then\(show\)/u);
 
   const afterReload = createTeacherPageHarness();
   assert.equal(afterReload.ioCalls.length, 1, "重新載入老師頁時會依 sessionStorage 重新建立 Socket 連線");
+});
+
+test("還原預覽依手動修改狀態顯示不同顏色及原值欄，且預覽不會送出確認", async () => {
+  const calls: string[] = [];
+  const harness = createTeacherPageHarness(async (url: string) => {
+    calls.push(url);
+    return { ok: true, json: async () => ({ id: "restore-preview", targets: [
+      { cell: { sheetName: "學習單", address: "G5" }, currentValue: "答案", originalValue: "（1）", status: "已被手動修改" },
+      { cell: { sheetName: "學習單", address: "G6" }, currentValue: "第二答案", originalValue: "(2)", status: "將還原" },
+    ] }) };
+  });
+  await harness.elements.get("#export-restore-button").onclick();
+  assert.equal(calls.includes("/api/teacher/export/restore"), true);
+  assert.equal(calls.includes("/api/teacher/export/restore/confirm"), false);
+  assert.equal(harness.elements.get("#export-restore-confirm-button").disabled, false);
+  harness.renderRestorePreview({ id: "restore-preview", targets: [
+    { cell: { sheetName: "學習單", address: "G5" }, currentValue: "答案", originalValue: "（1）", status: "已被手動修改" },
+    { cell: { sheetName: "學習單", address: "G6" }, currentValue: "第二答案", originalValue: "(2)", status: "將還原" },
+  ] });
+  const container = harness.elements.get("#export-preview");
+  const table = container.children[0];
+  const rows = table.children.at(-1).children;
+  assert.equal(rows[0].children.at(-1).className, "restore-manual");
+  assert.equal(rows[1].children.at(-1).className, "restore-will");
+  assert.equal(rows[0].children[2].textContent, "（1）");
 });
 
 test("screen page connects as a read-only screen and renders all three stages with projection styling", () => {

@@ -166,7 +166,7 @@ test("回寫路由要求老師 PIN、活動結束、Google 來源與有效預覽
   }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
 });
 
-test("還原最近一次成功回寫路由要求老師 PIN 與已結束活動，無紀錄時回報清楚結果", async () => {
+test("還原預覽 API 要求老師 PIN 與已結束活動，沒有紀錄時只回傳空預覽", async () => {
   let writes = 0;
   await withServer(async (base, _directory, app) => {
     app.manager.create(exportSet(), { activityCode: "2468" }).stage = "buzzing";
@@ -177,9 +177,69 @@ test("還原最近一次成功回寫路由要求老師 PIN 與已結束活動，
     app.manager.getActive()!.stage = "ended";
     const restored = await fetch(`${base}/api/teacher/export/restore`, { method: "POST", headers: teacherHeaders(), body: "{}" });
     assert.equal(restored.status, 200);
-    assert.deepEqual(await restored.json(), { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" });
+    const preview = await restored.json() as { id: string; targets: unknown[]; message: string };
+    assert.ok(preview.id);
+    assert.deepEqual(preview.targets, []);
+    assert.equal(preview.message, "沒有可還原的成功回寫紀錄。");
     assert.equal(writes, 0);
   }, { readSpreadsheet: async () => exportSheet, writeSpreadsheetValues: async () => { writes += 1; return 1; } });
+});
+
+test("還原預覽不寫入；確認端點重讀後還原所有格並回報驗證結果", async () => {
+  let current: GridSheet = { ...exportSheet, rows: [["題號", "題目", "作答"], [1, "匯出題", "原值"]] };
+  let writes = 0;
+  await withServer(async (base, _directory, app) => {
+    await makeEndedExportActivity(app);
+    const exportPreview = (await (await fetch(`${base}/api/teacher/export/preview`, {
+      method: "POST", headers: teacherHeaders(), body: "{}",
+    })).json() as { preview: { id: string } }).preview;
+    await fetch(`${base}/api/teacher/export/confirm`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: exportPreview.id }),
+    });
+
+    const restoreResponse = await fetch(`${base}/api/teacher/export/restore`, {
+      method: "POST", headers: teacherHeaders(), body: "{}",
+    });
+    assert.equal(restoreResponse.status, 200);
+    const preview = await restoreResponse.json() as { id: string; targets: { cell: { address: string }; originalValue: unknown; status: string }[] };
+    assert.deepEqual(preview.targets.map(({ cell, originalValue, status }) => [cell.address, originalValue, status]), [["C2", "原值", "將還原"]]);
+    assert.equal(writes, 1, "preview must not write");
+
+    const confirmed = await fetch(`${base}/api/teacher/export/restore/confirm`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: preview.id }),
+    });
+    assert.equal(confirmed.status, 200);
+    const result = await confirmed.json() as { restored: { address: string }[]; failed: unknown[] };
+    assert.deepEqual(result.restored, [{ address: "匯出測試!C2" }]);
+    assert.deepEqual(result.failed, []);
+    assert.equal(writes, 2);
+
+    const secondExportPreview = (await (await fetch(`${base}/api/teacher/export/preview`, {
+      method: "POST", headers: teacherHeaders(), body: "{}",
+    })).json() as { preview: { id: string } }).preview;
+    await fetch(`${base}/api/teacher/export/confirm`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: secondExportPreview.id }),
+    });
+    const stalePreview = await fetch(`${base}/api/teacher/export/restore`, {
+      method: "POST", headers: teacherHeaders(), body: "{}",
+    });
+    const stale = await stalePreview.json() as { id: string };
+    current = { ...current, rows: [["題號", "題目", "作答"], [1, "匯出題", "預覽後被修改"]] };
+    const staleConfirm = await fetch(`${base}/api/teacher/export/restore/confirm`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ previewId: stale.id }),
+    });
+    assert.equal(staleConfirm.status, 400);
+    assert.match((await staleConfirm.json() as { error: string }).error, /重新產生還原預覽/u);
+    assert.equal(writes, 3, "stale restore preview must not perform another write");
+  }, {
+    readSpreadsheet: async () => current,
+    writeSpreadsheetValues: async (_id, ranges) => {
+      writes += 1;
+      const value = ranges[0]!.values[0]![0];
+      current = { ...current, rows: [["題號", "題目", "作答"], [1, "匯出題", value as string]] };
+      return ranges.length;
+    },
+  });
 });
 
 test("CSV 下載要求老師 PIN 與已結束活動，XLSX 題目集可下載 ASCII 檔名", async () => {
@@ -255,7 +315,8 @@ test("老師頁與老師 API 均需 PIN；學生 HTML 不含老師控制項或�
     assert.match(teacherHtml, /結果匯出/u);
     assert.match(teacherHtml, /回寫預覽/u);
     assert.match(teacherHtml, /確認回寫/u);
-    assert.match(teacherHtml, /還原最近一次回寫/u);
+    assert.match(teacherHtml, /id="export-restore-button"[^>]*>還原預覽/u);
+    assert.match(teacherHtml, /id="export-restore-confirm-button"[^>]*>確認還原/u);
     assert.match(teacherHtml, /下載 CSV/u);
     assert.match(teacherHtml, /活動資料只存在伺服器記憶體，重啟後消失/u);
     assert.match(teacherHtml, /題目集來源為 XLSX/u);
