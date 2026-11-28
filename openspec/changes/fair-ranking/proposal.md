@@ -27,4 +27,5 @@
 
 - 主要程式：`src/live-buzzer/model.ts`、`submissions.ts`、`views.ts`、`pages.ts`、`http-server.ts`、`socket-server.ts`、`result-csv.ts`、`result-export.ts`。
 - 主要測試：`tests/live-buzzer-activity.test.ts`、`live-buzzer-submissions.test.ts`、`live-buzzer-views.test.ts`、`live-buzzer-http.test.ts`、`live-buzzer-socket.test.ts`、`spreadsheet-export-validation.test.ts`。
-- 需求基準來源：使用者提供的 v0.6／v0.7 與 SpecKit 組 005 對齊要求，以及本次訊息所列規則；目前 checkout 的 `docs/共同需求基準.md` 仍標為草稿 v0.4，未提供上述版本或組 005 草稿供逐字比對。
+- 規則與說明文字依 SpecKit 組 005（shared/src/fairness.ts、cap-rule）與共同需求基準 v0.6 的 E3、D7、決策單 2-15 整理；v0.6／v0.7 尚未合併至 SpecKit main。
+- 目前 checkout 的 `docs/共同需求基準.md` 仍標為草稿 v0.4。

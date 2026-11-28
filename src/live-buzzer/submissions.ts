@@ -20,6 +20,28 @@ export interface QuestionResult {
   readonly sequence: number | null;
 }
 
+export type RankingRule = "speed" | "cap";
+
+export interface RankedSubmissionResult {
+  readonly submission: AcceptedSubmission;
+  readonly originalRank: number;
+  readonly finalRank: number | null;
+  readonly successful: boolean;
+  readonly skipped: boolean;
+  readonly explanation: string;
+}
+
+export interface RankingQuestionResult extends QuestionResult {
+  readonly explanation: string | null;
+}
+
+export interface RankingResults {
+  readonly rule: RankingRule;
+  readonly cap: number | null;
+  readonly submissions: readonly RankedSubmissionResult[];
+  readonly questions: readonly RankingQuestionResult[];
+}
+
 /** Returns each submitted group's question-local rank, ordered by server sequence. */
 export function getQuestionRanks(
   activity: ActivityState,
@@ -118,4 +140,131 @@ export function getQuestionResults(activity: ActivityState): readonly QuestionRe
       sequence: first.sequence,
     };
   });
+}
+
+/** Recomputes all question outcomes in server-sequence order without mutating the activity. */
+export function calculateRankingResults(
+  activity: ActivityState,
+  rule: RankingRule = "speed",
+): RankingResults {
+  const ranksByQuestion = new Map<number, ReadonlyMap<string, number>>();
+  const acceptedSubmissions: AcceptedSubmission[] = [];
+  for (const question of activity.questionSet.questions) {
+    ranksByQuestion.set(question.number, getQuestionRanks(activity, question.number));
+    acceptedSubmissions.push(...(activity.submissions.get(question.number)?.values() ?? []));
+  }
+  acceptedSubmissions.sort((left, right) => left.sequence - right.sequence);
+
+  if (rule === "speed") {
+    const currentResults = getQuestionResults(activity);
+    const successfulGroupByQuestion = new Map(
+      currentResults.map(({ questionNumber, successfulGroup }) => [questionNumber, successfulGroup?.id]),
+    );
+    const submissions = acceptedSubmissions.map((submission): RankedSubmissionResult => {
+      const originalRank = ranksByQuestion.get(submission.questionNumber)?.get(submission.groupId);
+      if (originalRank === undefined) throw new Error("已接受提交缺少原始順位。");
+      return {
+        submission,
+        originalRank,
+        finalRank: originalRank,
+        successful: successfulGroupByQuestion.get(submission.questionNumber) === submission.groupId,
+        skipped: false,
+        explanation: "",
+      };
+    });
+    return {
+      rule,
+      cap: null,
+      submissions,
+      questions: currentResults.map((result) => ({ ...result, explanation: null })),
+    };
+  }
+
+  const cap = Math.ceil(activity.questionSet.questions.length / activity.groups.length);
+  const successfulCountByGroup = new Map<string, number>();
+  const winnerByQuestion = new Map<number, AcceptedSubmission>();
+  const skippedGroupsByQuestion = new Map<number, string[]>();
+  const finalRankByQuestion = new Map<number, number>();
+  const groupNameById = new Map(activity.groups.map(({ id, name }) => [id, name]));
+  const rankedBySequence = new Map<number, RankedSubmissionResult>();
+
+  for (const submission of acceptedSubmissions) {
+    const originalRank = ranksByQuestion.get(submission.questionNumber)?.get(submission.groupId);
+    if (originalRank === undefined) throw new Error("已接受提交缺少原始順位。");
+    const groupName = groupNameById.get(submission.groupId) ?? submission.groupId;
+    const successfulCount = successfulCountByGroup.get(submission.groupId) ?? 0;
+    if (successfulCount >= cap) {
+      rankedBySequence.set(submission.sequence, {
+        submission,
+        originalRank,
+        finalRank: null,
+        successful: false,
+        skipped: true,
+        explanation: `${groupName}已達上限 ${cap} 題`,
+      });
+      const skipped = skippedGroupsByQuestion.get(submission.questionNumber) ?? [];
+      skipped.push(groupName);
+      skippedGroupsByQuestion.set(submission.questionNumber, skipped);
+      continue;
+    }
+
+    const finalRank = (finalRankByQuestion.get(submission.questionNumber) ?? 0) + 1;
+    finalRankByQuestion.set(submission.questionNumber, finalRank);
+    const previousSkippedGroups = skippedGroupsByQuestion.get(submission.questionNumber) ?? [];
+    const successful = !winnerByQuestion.has(submission.questionNumber);
+    if (successful) {
+      winnerByQuestion.set(submission.questionNumber, submission);
+      successfulCountByGroup.set(submission.groupId, successfulCount + 1);
+    }
+    rankedBySequence.set(submission.sequence, {
+      submission,
+      originalRank,
+      finalRank,
+      successful,
+      skipped: false,
+      explanation: successful && previousSkippedGroups.length > 0
+        ? `遞補：${previousSkippedGroups.join("、")}已達上限`
+        : "",
+    });
+  }
+
+  const submissions = acceptedSubmissions.map((submission) => {
+    const result = rankedBySequence.get(submission.sequence);
+    if (result === undefined) throw new Error("已接受提交缺少排名結果。");
+    return result;
+  });
+  const submittedGroupIdsByQuestion = new Map<number, Set<string>>();
+  for (const submission of acceptedSubmissions) {
+    const groupIds = submittedGroupIdsByQuestion.get(submission.questionNumber) ?? new Set<string>();
+    groupIds.add(submission.groupId);
+    submittedGroupIdsByQuestion.set(submission.questionNumber, groupIds);
+  }
+  const questions = activity.questionSet.questions.map((question): RankingQuestionResult => {
+    const winner = winnerByQuestion.get(question.number);
+    if (winner !== undefined) {
+      const group = activity.groups.find(({ id }) => id === winner.groupId);
+      if (group === undefined) throw new Error("成功提交所屬組別不存在。");
+      return {
+        questionNumber: question.number,
+        successfulGroup: { id: group.id, name: group.name },
+        answers: { ...winner.answers },
+        sequence: winner.sequence,
+        explanation: null,
+      };
+    }
+
+    const submittedGroupIds = submittedGroupIdsByQuestion.get(question.number);
+    if (submittedGroupIds === undefined || submittedGroupIds.size === 0) {
+      return { questionNumber: question.number, successfulGroup: null, answers: null, sequence: null, explanation: null };
+    }
+    const submittedGroupNames = activity.groups
+      .filter(({ id }) => submittedGroupIds.has(id))
+      .map(({ name }) => name);
+    const explanation = submittedGroupNames.length === 1
+      ? `唯一送出的${submittedGroupNames[0]}已達上限 ${cap} 題`
+      : `送出的${submittedGroupNames.join("、")}都已達上限 ${cap} 題`;
+    return { questionNumber: question.number, successfulGroup: null, answers: null, sequence: null, explanation };
+  });
+
+  return { rule, cap, submissions, questions };
 }
