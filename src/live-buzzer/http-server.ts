@@ -262,15 +262,35 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
         if (method === "POST" && route === "/api/teacher/export/restore") {
           const activity = manager.getActive();
           if (activity === undefined || activity.stage !== "ended") {
-            sendJson(response, 409, { error: "請先結束活動再還原回寫。" }); return;
+            sendJson(response, 409, { error: "請先結束活動再預覽還原。" }); return;
+          }
+          if (activity.questionSet.googleSource === undefined) {
+            sendJson(response, 409, { error: "此題目集沒有 Google 試算表來源，無法還原。" }); return;
+          }
+          const preview = await exportPreviews.createRestorePreview(
+            activity.questionSet,
+            activity.activityCode,
+            options.exportBackupDirectory,
+          );
+          sendJson(response, 200, preview); return;
+        }
+        if (method === "POST" && route === "/api/teacher/export/restore/confirm") {
+          const body = await readJson(request);
+          if (typeof body.previewId !== "string" || body.previewId.length === 0) {
+            sendJson(response, 400, { error: "請提供有效的還原預覽 ID。" }); return;
+          }
+          const activity = manager.getActive();
+          if (activity === undefined || activity.stage !== "ended") {
+            sendJson(response, 409, { error: "請先結束活動再確認還原。" }); return;
           }
           if (activity.questionSet.googleSource === undefined) {
             sendJson(response, 409, { error: "此題目集沒有 Google 試算表來源，無法還原。" }); return;
           }
           const writeRawValues = options.writeSpreadsheetValues ?? (async (spreadsheetId, ranges) =>
             (await createGoogleSheetsWriter()).writeRawValues(spreadsheetId, ranges));
-          const result = await exportPreviews.restoreLatest(
-            activity.questionSet,
+          const result = await exportPreviews.confirmRestore(
+            body.previewId,
+            activity.activityCode,
             exportReadSpreadsheet,
             writeRawValues,
             options.exportBackupDirectory,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -153,7 +153,8 @@ test("標記預覽保留原文並替換答案；確認寫 RAW 完整值且備份
     const repeatedPreview = await service.create(imported, [{ questionNumber: 1, subquestionNumber: 1, answer: "D3" }]);
     assert.deepEqual(repeatedPreview.targets.map(({ currentValue, answer, status }) => [currentValue, answer, status]), [["答：D3", "答：D3", "內容相同略過"]]);
     const writes: GoogleSheetsValueRange[] = [];
-    const restored = await service.restoreLatest(imported, async () => current, async (_id, data) => { writes.push(...data); current = { ...current, rows: [["題號", "題目", "作答"], [1, "題幹", data[0]!.values[0]![0] as string]] }; return 1; }, directory);
+    const restorePreview = await service.createRestorePreview(imported, "marker", directory);
+    const restored = await service.confirmRestore(restorePreview.id, "marker", async () => current, async (_id, data) => { writes.push(...data); current = { ...current, rows: [["題號", "題目", "作答"], [1, "題幹", data[0]!.values[0]![0] as string]] }; return 1; }, directory);
     assert.deepEqual(restored.restored, [{ address: "學習單!C2" }]);
     assert.deepEqual(writes, [{ range: "'學習單'!C2", values: [["答：{{答}}"]] }]);
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -308,7 +309,7 @@ test("均分上限 2-15 範例的回寫預覽與確認共用遞補組答案", as
   }
 });
 
-test("備份每次獨立保存來源、座標、時間、狀態與型別；還原只恢復相符格並忽略失敗備份", async () => {
+test("備份每次獨立保存來源、座標、時間、狀態與型別；確認還原含手動修改格並忽略失敗備份", async () => {
   const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "export-restore-test-"));
   let current: GridSheet = {
     ...sheet(),
@@ -357,7 +358,8 @@ test("備份每次獨立保存來源、座標、時間、狀態與型別；還�
     assert.doesNotMatch(allBackupText, /private_key|client_secret|service.account.credentials/iu);
 
     const restoreData: GoogleSheetsValueRange[][] = [];
-    const result = await service.restoreLatest(originalSet, async () => current, async (_id, data) => {
+    const restorePreview = await service.createRestorePreview(originalSet, "1234", backupDirectory);
+    const result = await service.confirmRestore(restorePreview.id, "1234", async () => current, async (_id, data) => {
       restoreData.push([...data]);
       for (const item of data) {
         const rowIndex = item.range.includes("D3") ? 2 : 3;
@@ -367,15 +369,12 @@ test("備份每次獨立保存來源、座標、時間、狀態與型別；還�
       }
       return data.length;
     }, backupDirectory);
-    assert.equal(result.backupPath, first.backupPath, "failed attempt must not replace latest successful backup");
-    assert.deepEqual(result.restored, [{ address: "學習單!D3" }]);
-    assert.deepEqual(result.skipped, [{
-      address: "學習單!D4",
-      reason: "目前內容與當次回寫值不同，為避免覆蓋後續修改而跳過。",
-      currentValue: "changed-after-write",
-      expectedValue: "saved-2",
-    }]);
-    assert.deepEqual(restoreData, [[{ range: "'學習單'!D3", values: [[12]] }]]);
+    assert.deepEqual(result.restored, [{ address: "學習單!D3" }, { address: "學習單!D4" }]);
+    assert.deepEqual(result.skipped, []);
+    assert.deepEqual(restoreData, [[
+      { range: "'學習單'!D3", values: [[12]] },
+      { range: "'學習單'!D4", values: [[""]] },
+    ]]);
   } finally {
     await rm(backupDirectory, { recursive: true, force: true });
   }
@@ -386,8 +385,9 @@ test("沒有成功回寫備份時回報明確結果且不呼叫寫入", async ()
   try {
     const service = new SpreadsheetExportPreviewService(async () => sheet());
     let writeCalls = 0;
-    const result = await service.restoreLatest(importedSet(), async () => sheet(), async () => { writeCalls += 1; return 1; }, backupDirectory);
-    assert.deepEqual(result, { restored: [], skipped: [], failed: [], message: "沒有可還原的成功回寫紀錄。" });
+    const result = await service.createRestorePreview(importedSet(), "no-backup", backupDirectory);
+    assert.deepEqual(result.targets, []);
+    assert.equal(result.message, "沒有可還原的成功回寫紀錄。");
     assert.equal(writeCalls, 0);
   } finally {
     await rm(backupDirectory, { recursive: true, force: true });
@@ -410,7 +410,8 @@ test("空白原值還原時以空字串寫入並重新讀取確認已清空", as
 
     let restoreRequest: readonly GoogleSheetsValueRange[] | undefined;
     let readCount = 0;
-    const result = await service.restoreLatest(importedSet(), async () => {
+    const restorePreview = await service.createRestorePreview(importedSet(), "blank-restore", backupDirectory);
+    const result = await service.confirmRestore(restorePreview.id, "blank-restore", async () => {
       readCount += 1;
       return current;
     }, async (_id, data) => {
@@ -422,7 +423,7 @@ test("空白原值還原時以空字串寫入並重新讀取確認已清空", as
     }, backupDirectory);
     assert.deepEqual(restoreRequest, [{ range: "'學習單'!D3", values: [[""]] }]);
     assert.equal(restoreRequest!.some(({ values }) => values.flat().some((value) => value === null)), false);
-    assert.equal(readCount, 2, "restore must reread after writing");
+    assert.equal(readCount, 2, "confirmation rereads before write and once after write for verification");
     assert.deepEqual(result.restored, [{ address: "學習單!D3" }]);
     assert.deepEqual(result.failed, []);
     assert.equal(current.rows[2]?.[3], "");
@@ -443,7 +444,8 @@ test("還原後重新讀取仍不等於原值時列為失敗而非已還原", as
       current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "must-restore"] : row) };
       return 1;
     }, backupDirectory);
-    const result = await service.restoreLatest(importedSet(), async () => current, async () => 1, backupDirectory);
+    const restorePreview = await service.createRestorePreview(importedSet(), "restore-mismatch", backupDirectory);
+    const result = await service.confirmRestore(restorePreview.id, "restore-mismatch", async () => current, async () => 1, backupDirectory);
     assert.deepEqual(result.restored, []);
     assert.deepEqual(result.failed, [{
       address: "學習單!D3",
@@ -453,5 +455,163 @@ test("還原後重新讀取仍不等於原值時列為失敗而非已還原", as
     }]);
   } finally {
     await rm(backupDirectory, { recursive: true, force: true });
+  }
+});
+
+test("同活動兩次回寫與新增格保留首次原值；重建服務後預覽並確認還原含手動修改格", async () => {
+  const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "restore-first-repeat-"));
+  let current: GridSheet = { ...sheet(), rows: sheet().rows.map((row, index) => index === 2
+    ? [...row.slice(0, 3), "D3 原值"] : index === 3 ? [...row.slice(0, 3), "D4 原值"] : row) };
+  try {
+    const questionSet = importedSet();
+    const firstService = new SpreadsheetExportPreviewService(async () => current);
+    const first = await firstService.create(questionSet, [{ questionNumber: 2, subquestionNumber: 1, answer: "第一次答案" }], "first-activity");
+    await firstService.confirmAndWrite(first.id, "first-activity", async (_id, ranges) => {
+      current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), String(ranges[0]!.values[0]![0])] : row) };
+      return ranges.length;
+    }, backupDirectory);
+    const second = await firstService.create(questionSet, [
+      { questionNumber: 2, subquestionNumber: 1, answer: "第二次答案" },
+      { questionNumber: 2, subquestionNumber: 2, answer: "新增格答案" },
+    ], "first-activity");
+    await firstService.confirmAndWrite(second.id, "first-activity", async (_id, ranges) => {
+      current = { ...current, rows: current.rows.map((row, index) => {
+        const range = ranges.find((item) => item.range.endsWith(index === 2 ? "D3" : "D4"));
+        return range === undefined ? row : [...row.slice(0, 3), String(range.values[0]![0])];
+      }) };
+      return ranges.length;
+    }, backupDirectory);
+    current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "老師手動修改"] : row) };
+
+    const restartedService = new SpreadsheetExportPreviewService(async () => current);
+    const preview = await restartedService.createRestorePreview(questionSet, "first-activity", backupDirectory);
+    assert.deepEqual(preview.targets.map(({ cell, currentValue, originalValue, status }) => ({
+      address: cell.address, currentValue, originalValue, status,
+    })), [
+      { address: "D3", currentValue: "老師手動修改", originalValue: "D3 原值", status: "已被手動修改" },
+      { address: "D4", currentValue: "新增格答案", originalValue: "D4 原值", status: "將還原" },
+    ]);
+
+    const requests: GoogleSheetsValueRange[] = [];
+    const result = await restartedService.confirmRestore(preview.id, "first-activity", async () => current, async (_id, ranges) => {
+      requests.push(...ranges);
+      current = { ...current, rows: current.rows.map((row, index) => {
+        const range = ranges.find((item) => item.range.endsWith(index === 2 ? "D3" : "D4"));
+        return range === undefined ? row : [...row.slice(0, 3), String(range.values[0]![0])];
+      }) };
+      return ranges.length;
+    }, backupDirectory);
+    assert.deepEqual(requests.map(({ range, values }) => [range, values]), [
+      ["'學習單'!D3", [["D3 原值"]]], ["'學習單'!D4", [["D4 原值"]]],
+    ]);
+    assert.deepEqual(result.restored, [{ address: "學習單!D3" }, { address: "學習單!D4" }]);
+    assert.deepEqual(result.failed, []);
+
+    const third = await restartedService.create(questionSet, [{ questionNumber: 2, subquestionNumber: 1, answer: "還原後再次回寫" }], "first-activity");
+    await restartedService.confirmAndWrite(third.id, "first-activity", async (_id, ranges) => {
+      current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), String(ranges[0]!.values[0]![0])] : row) };
+      return ranges.length;
+    }, backupDirectory);
+    const finalPreview = await restartedService.createRestorePreview(questionSet, "first-activity", backupDirectory);
+    assert.equal(finalPreview.targets.find(({ cell }) => cell.address === "D3")!.originalValue, "D3 原值");
+    assert.equal(finalPreview.targets.find(({ cell }) => cell.address === "D3")!.lastWrittenValue, "還原後再次回寫");
+  } finally { await rm(backupDirectory, { recursive: true, force: true }); }
+});
+
+test("還原預覽後試算表任一格改變時整批中止且不呼叫寫入", async () => {
+  const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "restore-first-stale-"));
+  let current: GridSheet = { ...sheet(), rows: sheet().rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "格子原值"] : row) };
+  try {
+    const service = new SpreadsheetExportPreviewService(async () => current);
+    const exportPreview = await service.create(importedSet(), [{ questionNumber: 2, subquestionNumber: 1, answer: "系統答案" }], "stale-activity");
+    await service.confirmAndWrite(exportPreview.id, "stale-activity", async () => {
+      current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "系統答案"] : row) };
+      return 1;
+    }, backupDirectory);
+    const restorePreview = await service.createRestorePreview(importedSet(), "stale-activity", backupDirectory);
+    current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "預覽後修改"] : row) };
+    let writes = 0;
+    await assert.rejects(service.confirmRestore(restorePreview.id, "stale-activity", async () => current, async () => { writes += 1; return 1; }, backupDirectory), /重新產生還原預覽/u);
+    assert.equal(writes, 0);
+  } finally { await rm(backupDirectory, { recursive: true, force: true }); }
+});
+
+test("還原可讀 restore-first 前單次 JSON 備份並略過無效或缺欄位檔案", async () => {
+  const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "restore-first-legacy-"));
+  let current: GridSheet = { ...sheet(), rows: sheet().rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "舊版寫入值"] : row) };
+  try {
+    await writeFile(path.join(backupDirectory, "export-legacy.json"), JSON.stringify({
+      id: "export-legacy", createdAt: "2026-01-01T00:00:00.000Z", status: "succeeded",
+      spreadsheetId: "mock-spreadsheet", gid: 42, activityCode: "legacy-activity",
+      targets: [{ questionNumber: 2, subquestionNumber: 1, sheetName: "學習單", address: "D3", originalValue: "舊版原值", writtenValue: "舊版寫入值" }],
+    }));
+    await writeFile(path.join(backupDirectory, "broken.json"), "{");
+    await writeFile(path.join(backupDirectory, "missing-fields.json"), JSON.stringify({ status: "succeeded", targets: [] }));
+    const service = new SpreadsheetExportPreviewService(async () => current);
+    const preview = await service.createRestorePreview(importedSet(), "legacy-activity", backupDirectory);
+    assert.equal(preview.targets.length, 1);
+    assert.equal(preview.targets[0]!.originalValue, "舊版原值");
+    const result = await service.confirmRestore(preview.id, "legacy-activity", async () => current, async (_id, ranges) => {
+      assert.deepEqual(ranges[0]!.values, [["舊版原值"]]);
+      current = { ...current, rows: current.rows.map((row, index) => index === 2 ? [...row.slice(0, 3), "舊版原值"] : row) };
+      return 1;
+    }, backupDirectory);
+    assert.deepEqual(result.restored, [{ address: "學習單!D3" }]);
+  } finally { await rm(backupDirectory, { recursive: true, force: true }); }
+});
+
+test("標記模式兩階段還原寫回包含 {{答}} 的首次原文", async () => {
+  const markedSheet: GridSheet = { name: "學習單", rows: [["題號", "題目", "作答"], [1, "題幹", "答：{{答}}"]], mergedRanges: [] };
+  const markedSet = { ...createImportPreview(parseGuidedNotes(markedSheet), { spreadsheetId: "marker-sheet", gid: 9 }, "google") };
+  let current = markedSheet;
+  const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "restore-first-marker-"));
+  try {
+    const service = new SpreadsheetExportPreviewService(async () => current);
+    const exportPreview = await service.create(markedSet, [{ questionNumber: 1, subquestionNumber: 1, answer: "D3" }], "marker-activity");
+    await service.confirmAndWrite(exportPreview.id, "marker-activity", async (_id, ranges) => {
+      current = { ...markedSheet, rows: [["題號", "題目", "作答"], [1, "題幹", String(ranges[0]!.values[0]![0])]] };
+      return 1;
+    }, backupDirectory);
+    const restorePreview = await service.createRestorePreview(markedSet, "marker-activity", backupDirectory);
+    assert.equal(restorePreview.targets[0]!.originalValue, "答：{{答}}");
+    const result = await service.confirmRestore(restorePreview.id, "marker-activity", async () => current, async (_id, ranges) => {
+      assert.equal(ranges[0]!.values[0]![0], "答：{{答}}");
+      current = { ...markedSheet, rows: [["題號", "題目", "作答"], [1, "題幹", "答：{{答}}"]] };
+      return 1;
+    }, backupDirectory);
+    assert.deepEqual(result.restored, [{ address: "學習單!C2" }]);
+  } finally { await rm(backupDirectory, { recursive: true, force: true }); }
+});
+
+test("Q7 無右側格時寫入沿用標籤格式，並可還原原標籤", async () => {
+  for (const [label, expected] of [["（1）", "（1）答案"], ["(1)", "(1)答案"]] as const) {
+    const q7Sheet: GridSheet = { name: "學習單", rows: [["題號", "題目", "作答"], [2, "小題", label]], mergedRanges: [] };
+    const questionSet = { ...createImportPreview(parseGuidedNotes(q7Sheet), { spreadsheetId: "q7-sheet", gid: 11 }, "google") };
+    const backupDirectory = await mkdtemp(path.join(os.tmpdir(), "restore-first-q7-"));
+    let current = q7Sheet;
+    try {
+      const service = new SpreadsheetExportPreviewService(async () => current);
+      const exportPreview = await service.create(questionSet, [{ questionNumber: 2, subquestionNumber: 1, answer: "答案" }], "q7-activity");
+      assert.equal(exportPreview.targets[0]!.cell.address, "C2");
+      assert.equal(exportPreview.targets[0]!.answer, expected);
+      await service.confirmAndWrite(exportPreview.id, "q7-activity", async (_id, ranges) => {
+        current = { ...q7Sheet, rows: [["題號", "題目", "作答"], [2, "小題", String(ranges[0]!.values[0]![0])]] };
+        return 1;
+      }, backupDirectory);
+      const secondExport = await service.create(questionSet, [{ questionNumber: 2, subquestionNumber: 1, answer: "第二答案" }], "q7-activity");
+      assert.equal(secondExport.targets[0]!.answer, `${label}第二答案`);
+      await service.confirmAndWrite(secondExport.id, "q7-activity", async (_id, ranges) => {
+        current = { ...q7Sheet, rows: [["題號", "題目", "作答"], [2, "小題", String(ranges[0]!.values[0]![0])]] };
+        return 1;
+      }, backupDirectory);
+      const restorePreview = await service.createRestorePreview(questionSet, "q7-activity", backupDirectory);
+      assert.equal(restorePreview.targets[0]!.originalValue, label);
+      const result = await service.confirmRestore(restorePreview.id, "q7-activity", async () => current, async (_id, ranges) => {
+        assert.equal(ranges[0]!.values[0]![0], label);
+        current = { ...q7Sheet, rows: [["題號", "題目", "作答"], [2, "小題", label]] };
+        return 1;
+      }, backupDirectory);
+      assert.deepEqual(result.restored, [{ address: "學習單!C2" }]);
+    } finally { await rm(backupDirectory, { recursive: true, force: true }); }
   }
 });
