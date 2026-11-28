@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import { io as createClient } from "socket.io-client";
 import { getQuestionResults, submitAnswers } from "../src/live-buzzer/submissions.ts";
 import { createLiveBuzzerServer } from "../src/live-buzzer/http-server.ts";
@@ -15,6 +15,16 @@ import type { GoogleSheetsValueRange } from "../src/guided-notes/google-sheets-a
 import { GoogleSheetsWriteError } from "../src/guided-notes/google-sheets-adapter.ts";
 
 const PIN = "test-teacher-pin";
+let savedTeacherPin: string | undefined;
+beforeEach(() => {
+  savedTeacherPin = process.env.TEACHER_PIN;
+  delete process.env.TEACHER_PIN;
+});
+afterEach(() => {
+  if (savedTeacherPin === undefined) delete process.env.TEACHER_PIN;
+  else process.env.TEACHER_PIN = savedTeacherPin;
+});
+
 const mockSheet: GridSheet = {
   name: "HTTP 匯入測試",
   rows: [["題號", "題目", "作答"], [1, "測試題目", "（1）"]],

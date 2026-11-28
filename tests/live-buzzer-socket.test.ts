@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import test from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import { io as createClient, type Socket as ClientSocket } from "socket.io-client";
 import { ActivityManager, transitionActivityStage } from "../src/live-buzzer/model.ts";
 import { submitAnswers } from "../src/live-buzzer/submissions.ts";
@@ -10,6 +10,16 @@ import { createStudentStatusResponse } from "../src/live-buzzer/views.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 
 const TEACHER_PIN = "local-test-pin";
+let savedTeacherPin: string | undefined;
+beforeEach(() => {
+  savedTeacherPin = process.env.TEACHER_PIN;
+  delete process.env.TEACHER_PIN;
+});
+afterEach(() => {
+  if (savedTeacherPin === undefined) delete process.env.TEACHER_PIN;
+  else process.env.TEACHER_PIN = savedTeacherPin;
+});
+
 const STUDENT_TOKENS = new Map([
   ["team-a-token", { activityCode: "2468", groupId: "group-1" }],
   ["team-b-token", { activityCode: "2468", groupId: "group-2" }],

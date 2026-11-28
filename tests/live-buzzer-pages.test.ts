@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import { screenPage, studentPage, teacherLoginPage, teacherPage } from "../src/live-buzzer/pages.ts";
+
+let savedTeacherPin: string | undefined;
+beforeEach(() => {
+  savedTeacherPin = process.env.TEACHER_PIN;
+  delete process.env.TEACHER_PIN;
+});
+afterEach(() => {
+  if (savedTeacherPin === undefined) delete process.env.TEACHER_PIN;
+  else process.env.TEACHER_PIN = savedTeacherPin;
+});
 
 function createTeacherPageHarness(fetchImpl: (url: string, ...args: any[]) => Promise<any> = () => new Promise(() => {})) {
   const elements = new Map<string, any>();
