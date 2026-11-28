@@ -1,5 +1,5 @@
 import type { ActivityState, ActivityStage, RankingRule } from "./model.ts";
-import { getQuestionRanks, getQuestionResults, getRankingCap } from "./submissions.ts";
+import { calculateRankingResults, getRankingCap } from "./submissions.ts";
 
 export interface RankingRuleView {
   readonly name: "純速度" | "均分上限";
@@ -27,6 +27,7 @@ export interface StudentResultView {
   readonly questionNumber: number;
   readonly successfulGroup: { readonly id: string; readonly name: string } | null;
   readonly answers: readonly StudentAnswerView[] | null;
+  readonly explanation: string | null;
 }
 
 export interface StudentView {
@@ -66,8 +67,14 @@ export interface TeacherView {
       readonly submitted: boolean;
       readonly sequence: number | null;
       readonly rank: number | null;
+      readonly originalRank: number | null;
+      readonly finalRank: number | null;
+      readonly successful: boolean;
+      readonly skipped: boolean;
+      readonly explanation: string;
       readonly answers: readonly StudentAnswerView[] | null;
     }[];
+    readonly explanation: string | null;
   }[];
 }
 
@@ -128,15 +135,20 @@ export function createTeacherView(
     name: group.name,
     onlineStudentPages: onlineStudentPages.get(group.id) ?? 0,
   }));
+  const rankingResults = calculateRankingResults(activity);
+  const rankedSubmissions = new Map(rankingResults.submissions.map((result) => [result.submission.sequence, result]));
+  const rankingQuestions = new Map(rankingResults.questions.map((result) => [result.questionNumber, result]));
   const questions = activity.questionSet.questions.map((question) => {
-    const ranks = getQuestionRanks(activity, question.number);
+    const rankingQuestion = rankingQuestions.get(question.number);
     return {
       number: question.number,
       description: question.description,
       subquestions: question.subquestions.map(({ number }) => ({ number })),
+      explanation: rankingQuestion?.explanation ?? null,
       groups: activity.groups.map((group) => {
       const submission = activity.submissions.get(question.number)?.get(group.id);
-      const rank = ranks.get(group.id) ?? null;
+      const rankingResult = submission === undefined ? undefined : rankedSubmissions.get(submission.sequence);
+      const rank = rankingResult?.originalRank ?? null;
       let answers: readonly StudentAnswerView[] | null = null;
       if (submission !== undefined) {
         answers = question.subquestions.map((subquestion) => ({
@@ -150,6 +162,11 @@ export function createTeacherView(
         submitted: submission !== undefined,
         sequence: submission === undefined ? null : submission.sequence,
         rank,
+        originalRank: rank,
+        finalRank: rankingResult?.finalRank ?? null,
+        successful: rankingResult?.successful ?? false,
+        skipped: rankingResult?.skipped ?? false,
+        explanation: rankingResult?.explanation ?? "",
         answers,
       };
       }),
@@ -174,7 +191,7 @@ function createRankingRuleView(rule: RankingRule, questionCount: number, groupCo
 }
 
 function createStudentResults(activity: ActivityState): readonly StudentResultView[] {
-  const results = getQuestionResults(activity);
+  const results = calculateRankingResults(activity).questions;
   return results.map((result) => {
     let successfulGroup: StudentResultView["successfulGroup"] = null;
     if (result.successfulGroup !== null) {
@@ -191,6 +208,6 @@ function createStudentResults(activity: ActivityState): readonly StudentResultVi
         }));
       }
     }
-    return { questionNumber: result.questionNumber, successfulGroup, answers };
+    return { questionNumber: result.questionNumber, successfulGroup, answers, explanation: result.explanation };
   });
 }

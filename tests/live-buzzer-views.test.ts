@@ -26,6 +26,16 @@ function questionSet(): GuidedNotesQuestionSet {
   };
 }
 
+function twoQuestionSet(): GuidedNotesQuestionSet {
+  const set = questionSet();
+  return {
+    ...set,
+    totalQuestionCount: 2,
+    groupQuestionCount: 2,
+    questions: [set.questions[0]!, { ...set.questions[0]!, number: 8 }],
+  };
+}
+
 test("student view uses an explicit allowlist and excludes other groups' answers and ranks", () => {
   const activity = createActivityState(questionSet(), { activityCode: "2468" });
   transitionActivityStage(activity, "buzzing");
@@ -102,9 +112,40 @@ test("ended student view preserves successful-group results while own answers re
           { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
           { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
         ],
+      explanation: null,
       }]);
     }
   }
+});
+
+test("ended student result includes the no-success explanation for a skipped-only question", () => {
+  const activity = createActivityState(twoQuestionSet(), { activityCode: "2468", rankingRule: "cap" });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-1", 7, { 1: "ANSWER-1", 2: "ANSWER-2" });
+  submitAnswers(activity, "group-1", 8, { 1: "ANSWER-3", 2: "ANSWER-4" });
+  transitionActivityStage(activity, "ended");
+
+  const view = createStudentView(activity, "group-1");
+  assert.equal(view?.results?.[1]?.explanation, "唯一送出的第 1 組已達上限 1 題");
+});
+
+test("teacher view exposes central ranking fields and question explanation for rendering", () => {
+  const activity = createActivityState(twoQuestionSet(), { activityCode: "2468", rankingRule: "cap" });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-1", 7, { 1: "A1", 2: "A2" });
+  submitAnswers(activity, "group-1", 8, { 1: "B1", 2: "B2" });
+  submitAnswers(activity, "group-2", 8, { 1: "C1", 2: "C2" });
+
+  const view = createTeacherView(activity);
+  assert.deepEqual(view.questions[1]?.groups.map(({ originalRank, finalRank, successful, skipped, explanation }) => [
+    originalRank, finalRank, successful, skipped, explanation,
+  ]), [
+    [1, null, false, true, "第 1 組已達上限 1 題"],
+    [2, 1, true, false, "遞補：第 1 組已達上限"],
+    [null, null, false, false, ""],
+    [null, null, false, false, ""],
+  ]);
+  assert.equal(view.questions[1]?.explanation, null);
 });
 
 test("teacher view includes per-question rank and preserves internal server sequence", () => {

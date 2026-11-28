@@ -34,6 +34,17 @@ function questionSet(): GuidedNotesQuestionSet {
   };
 }
 
+function fiveQuestionSet(): GuidedNotesQuestionSet {
+  const first = questionSet().questions[0]!;
+  return {
+    ...questionSet(),
+    totalQuestionCount: 5,
+    singleQuestionCount: 5,
+    groupQuestionCount: 0,
+    questions: Array.from({ length: 5 }, (_, index) => ({ ...first, number: index + 1 })),
+  };
+}
+
 function buzzingActivity() {
   const activity = createActivityState(questionSet(), { activityCode: "1234" });
   assert.deepEqual(transitionActivityStage(activity, "buzzing"), { ok: true, stage: "buzzing" });
@@ -209,6 +220,55 @@ test("CSV 每筆提交每個小題一列，重用各題順位並排序，包含�
   assert.equal(csv, `\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n1,1,甲隊,A,1,1,是,${formatCsvSubmittedAt(firstSubmittedAt)},\r\n1,1,乙隊,B,2,2,否,${formatCsvSubmittedAt(activity.submissions.get(1)!.get("group-2")!.submittedAt)},\r\n2,1,乙隊,C,1,1,是,${formatCsvSubmittedAt(activity.submissions.get(2)!.get("group-2")!.submittedAt)},\r\n2,2,乙隊,D,1,1,是,${formatCsvSubmittedAt(activity.submissions.get(2)!.get("group-2")!.submittedAt)},\r\n`);
   assert.doesNotMatch(csv, /未提交/u);
   assert.match(firstSubmittedAt, /^\d{4}-\d\d-\d\dT.*Z$/u);
+});
+
+test("CSV 2-15 範例輸出原始與最終順位、跳過與遞補說明", () => {
+  const activity = createActivityState(questionSet(), { groupNames: ["第 1 組", "第 2 組"], rankingRule: "cap" });
+  transitionActivityStage(activity, "buzzing");
+  submitAnswers(activity, "group-1", 2, { 1: "先答題組一", 2: "先答題組二" });
+  submitAnswers(activity, "group-1", 1, { 1: "跳過答案" });
+  submitAnswers(activity, "group-2", 1, { 1: "遞補答案" });
+  for (const [questionNumber, groupId, timestamp] of [
+    [2, "group-1", "2026-11-27T13:00:00.000Z"],
+    [1, "group-1", "2026-11-27T13:01:00.000Z"],
+    [1, "group-2", "2026-11-27T13:02:00.000Z"],
+  ] as const) {
+    const accepted = activity.submissions.get(questionNumber)?.get(groupId);
+    assert.ok(accepted);
+    activity.submissions.get(questionNumber)!.set(groupId, { ...accepted, submittedAt: timestamp });
+  }
+
+  assert.equal(createResultsCsv(activity), [
+    "\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明",
+    "1,1,第 1 組,跳過答案,1,,否,2026-11-27T21:01:00+08:00,第 1 組已達上限 1 題",
+    "1,1,第 2 組,遞補答案,2,1,是,2026-11-27T21:02:00+08:00,遞補：第 1 組已達上限",
+    "2,1,第 1 組,先答題組一,1,1,是,2026-11-27T21:00:00+08:00,",
+    "2,2,第 1 組,先答題組二,1,1,是,2026-11-27T21:00:00+08:00,",
+    "",
+  ].join("\r\n"));
+});
+
+test("CSV 題目全部被跳過時保留每筆跳過說明，涵蓋單組與多組", () => {
+  for (const skippedGroupIds of [["group-1"], ["group-1", "group-2"]]) {
+    const activity = createActivityState(fiveQuestionSet(), { rankingRule: "cap" });
+    transitionActivityStage(activity, "buzzing");
+    submitAnswers(activity, "group-1", 1, { 1: "A1" });
+    submitAnswers(activity, "group-1", 2, { 1: "A2" });
+    submitAnswers(activity, "group-2", 3, { 1: "B3" });
+    submitAnswers(activity, "group-2", 4, { 1: "B4" });
+    for (const [index, groupId] of skippedGroupIds.entries()) {
+      submitAnswers(activity, groupId!, 5, { 1: `skip-${index}` });
+    }
+    const skippedRows = createResultsCsv(activity).split("\r\n").filter((row) => row.startsWith("5,1,"));
+    assert.deepEqual(skippedRows.map((row) => {
+      const columns = row.split(",");
+      return [...columns.slice(0, 7), columns[8]];
+    }),
+      skippedGroupIds.map((groupId, index) => [
+        "5", "1", groupId === "group-1" ? "第 1 組" : "第 2 組", `skip-${index}`,
+        String(index + 1), "", "否", `${groupId === "group-1" ? "第 1 組" : "第 2 組"}已達上限 2 題`,
+      ]));
+  }
 });
 
 test("CSV 以 UTF-8 BOM 輸出，正確跳脫含逗號、引號、換行與中文的組名和答案", () => {

@@ -493,7 +493,7 @@ test("HTTP 學生視圖在活動進行中及結束後只包含本組已提交答
       assert.equal(response.status, 200);
       const view = await response.json() as {
         questions: { subquestions: { submitted: boolean; answer?: string }[] }[];
-        results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null }[] | null;
+        results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null; explanation: string | null }[] | null;
       };
       assert.equal(view.questions[0]?.subquestions[0]?.answer, "TEAM-A-ANSWER");
       if (stage === "buzzing") {
@@ -509,6 +509,7 @@ test("HTTP 學生視圖在活動進行中及結束後只包含本組已提交答
           questionNumber: 1,
           successfulGroup: { id: "group-2", name: "第 2 組" },
           answers: [{ subquestionNumber: 1, answer: "SECRET-ANSWER-B" }],
+          explanation: null,
         }]);
         const ownAnswers = view.questions.flatMap(({ subquestions }) => subquestions.map(({ answer }) => answer));
         assert.deepEqual(ownAnswers, ["TEAM-A-ANSWER"]);

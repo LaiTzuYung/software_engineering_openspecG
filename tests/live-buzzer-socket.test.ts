@@ -268,7 +268,7 @@ test("Socket student views expose only the current group's answers before and af
   const endedView = await endedViewPromise as {
     stage: string;
     questions: { subquestions: { answer?: string }[] }[];
-    results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null }[] | null;
+    results: { questionNumber: number; successfulGroup: { id: string; name: string } | null; answers: { subquestionNumber: number; answer: string }[] | null; explanation: string | null }[] | null;
   };
   assert.equal(endedView.stage, "ended");
   assert.deepEqual(endedView.results, [{
@@ -278,6 +278,7 @@ test("Socket student views expose only the current group's answers before and af
       { subquestionNumber: 1, answer: "SECRET-ANSWER-B" },
       { subquestionNumber: 2, answer: "SECOND-SECRET-B" },
     ],
+    explanation: null,
   }]);
   assert.deepEqual(endedView.questions[0]?.subquestions.map(({ answer }) => answer), ["TEAM-A-ANSWER-1", "TEAM-A-ANSWER-2"]);
   assert.equal(JSON.stringify(endedView.questions).includes("SECRET-ANSWER-B"), false);
