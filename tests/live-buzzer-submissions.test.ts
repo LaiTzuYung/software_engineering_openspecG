@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createActivityState, transitionActivityStage } from "../src/live-buzzer/model.ts";
 import { getQuestionRanks, getQuestionResults, submitAnswers } from "../src/live-buzzer/submissions.ts";
-import { createResultsCsv } from "../src/live-buzzer/result-csv.ts";
+import { createResultsCsv, formatCsvSubmittedAt } from "../src/live-buzzer/result-csv.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
 
 function questionSet(): GuidedNotesQuestionSet {
@@ -112,6 +112,10 @@ test("records a server ISO timestamp on each accepted submission and shares it a
   assert.equal(typeof group.submission.submittedAt, "string");
 });
 
+test("CSV 送出時間轉為台灣 UTC+8，精確到秒且不含毫秒", () => {
+  assert.equal(formatCsvSubmittedAt("2026-11-27T13:47:01.559Z"), "2026-11-27T21:47:01+08:00");
+});
+
 test("orders near-simultaneous submissions by server sequence and accepts one answer per group and question", async () => {
   const activity = buzzingActivity();
   const [first, sameGroupRace, anotherGroup, anotherQuestion] = await Promise.all([
@@ -202,7 +206,7 @@ test("CSV 每筆提交每個小題一列，重用各題順位並排序，包含�
   const firstSubmittedAt = activity.submissions.get(1)!.get("group-1")!.submittedAt;
   const csv = createResultsCsv(activity);
   assert.ok(csv.startsWith("\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n"));
-  assert.equal(csv, `\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n1,1,甲隊,A,1,1,是,${firstSubmittedAt},\r\n1,1,乙隊,B,2,2,否,${activity.submissions.get(1)!.get("group-2")!.submittedAt},\r\n2,1,乙隊,C,1,1,是,${activity.submissions.get(2)!.get("group-2")!.submittedAt},\r\n2,2,乙隊,D,1,1,是,${activity.submissions.get(2)!.get("group-2")!.submittedAt},\r\n`);
+  assert.equal(csv, `\uFEFF題號,小題,組別,答案,原始順位,最終順位,是否成功,送出時間,說明\r\n1,1,甲隊,A,1,1,是,${formatCsvSubmittedAt(firstSubmittedAt)},\r\n1,1,乙隊,B,2,2,否,${formatCsvSubmittedAt(activity.submissions.get(1)!.get("group-2")!.submittedAt)},\r\n2,1,乙隊,C,1,1,是,${formatCsvSubmittedAt(activity.submissions.get(2)!.get("group-2")!.submittedAt)},\r\n2,2,乙隊,D,1,1,是,${formatCsvSubmittedAt(activity.submissions.get(2)!.get("group-2")!.submittedAt)},\r\n`);
   assert.doesNotMatch(csv, /未提交/u);
   assert.match(firstSubmittedAt, /^\d{4}-\d\d-\d\dT.*Z$/u);
 });

@@ -5,6 +5,13 @@ export const RESULT_CSV_HEADERS = [
   "題號", "小題", "組別", "答案", "原始順位", "最終順位", "是否成功", "送出時間", "說明",
 ] as const;
 
+/** Formats a server ISO timestamp as Taiwan local time without changing stored submission data. */
+export function formatCsvSubmittedAt(submittedAt: string): string {
+  const timestamp = Date.parse(submittedAt);
+  if (!Number.isFinite(timestamp)) throw new RangeError("提交時間不是有效的 ISO 時間。");
+  return `${new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 19)}+08:00`;
+}
+
 function escapeCsv(value: string | number): string {
   const valueText = String(value);
   const text = /^[=+\-@\t\r\n]/u.test(valueText) ? `'${valueText}` : valueText;
@@ -39,7 +46,7 @@ export function createResultsCsv(activity: ActivityState): string {
             rank,
             rank,
             successfulGroups.get(question.number) === submission.groupId ? "是" : "否",
-            submission.submittedAt,
+            formatCsvSubmittedAt(submission.submittedAt),
             "",
           ],
         });
