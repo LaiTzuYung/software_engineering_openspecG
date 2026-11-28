@@ -185,10 +185,10 @@ test("一般重複題號失敗並列出該題號全部位置", () => {
   assert.match(error.message, /2: 工作表甲!A2、工作表甲!A4/u);
 });
 
-test("無法解析題號與找不到表頭時回報明確錯誤", () => {
-  const invalidNumber = errorFrom(() => parseGuidedNotes(sheet([["題號", "作答"], ["Q-?", null]])));
-  assert.equal(invalidNumber.code, "question-number-invalid");
-  assert.deepEqual(invalidNumber.cells.map(({ row, column }) => [row, column]), [[2, 1]]);
+test("無效題號有有效題目可解析時警告略過，找不到表頭與零題仍失敗", () => {
+  const parsed = parseGuidedNotes(sheet([["題號", "作答"], ["Q-?", null], [1, "答案"]]));
+  assert.equal(parsed.warnings[0]?.code, "question-number-invalid");
+  assert.deepEqual(parsed.warnings[0]?.cell, { sheetName: "工作表甲", row: 2, column: 1 });
 
   const missingHeader = errorFrom(() => parseGuidedNotes(sheet([["無關", "標題"]])));
   assert.equal(missingHeader.code, "header-not-found");
@@ -196,4 +196,86 @@ test("無法解析題號與找不到表頭時回報明確錯誤", () => {
   const noQuestions = errorFrom(() => parseGuidedNotes(sheet([["題號", "作答"]])));
   assert.equal(noQuestions.code, "no-questions");
   assert.match(noQuestions.message, /沒有偵測到題目/u);
+});
+
+test("無效題號與其同題後續列略過並警告題號格位置", () => {
+  const parsed = parseGuidedNotes(sheet([
+    ["題號", "題目", "作答"],
+    ["Q-?", "無效題敘述", "無效答案"],
+    [null, "同題後續敘述", "同題後續答案"],
+    [1, "有效題", "答案一"],
+    [2, "下一題", "答案二"],
+  ]));
+
+  assert.deepEqual(parsed.questions.map(({ number }) => number), [1, 2]);
+  assert.equal(parsed.warnings.length, 1);
+  assert.equal(parsed.warnings[0]?.code, "question-number-invalid");
+  assert.match(parsed.warnings[0]?.message ?? "", /題號無法解析/u);
+  assert.deepEqual(parsed.warnings[0]?.cell, { sheetName: "工作表甲", row: 2, column: 1 });
+});
+
+test("第一個有效題號前的題目與作答內容略過並分別警告位置", () => {
+  const parsed = parseGuidedNotes(sheet([
+    ["題號", "題目", "作答"],
+    [null, "前置說明", null],
+    [null, null, "前置作答說明"],
+    [1, "有效題", "答案"],
+  ]));
+
+  assert.deepEqual(parsed.questions.map(({ number }) => number), [1]);
+  assert.equal(parsed.warnings.length, 2);
+  assert.deepEqual(parsed.warnings.map(({ cell }) => [cell.row, cell.column]), [[2, 2], [3, 3]]);
+  assert.match(parsed.warnings[0]?.message ?? "", /題號前.*略過/u);
+  assert.match(parsed.warnings[1]?.message ?? "", /題號前.*略過/u);
+});
+
+test("同一格的題號與作答文字不構成表頭", () => {
+  const error = errorFrom(() => parseGuidedNotes(sheet([
+    ["題號與作答"],
+    [1, "題幹", "答案"],
+  ])));
+  assert.equal(error.code, "header-not-found");
+});
+
+test("標籤接受全半形括號、括號內空白及標籤尾隨文字", () => {
+  const parsed = parseGuidedNotes(sheet(
+    [
+      ["題號", "題目", "作答", null],
+      [1, "半形標籤含空白", "( 1 )", null],
+      [2, "半形標籤及尾字", "(1)答案", null],
+    ],
+    [
+      { start: { row: 1, column: 3 }, end: { row: 1, column: 4 } },
+    ],
+  ));
+
+  assert.deepEqual(parsed.questions.map(({ subquestions }) => subquestions[0]?.number), [1, 1]);
+  assert.deepEqual(parsed.questions.map(({ subquestions }) => subquestions[0]?.labelCell?.column), [3, 3]);
+  assert.deepEqual(parsed.questions.map(({ subquestions }) => subquestions[0]?.answerCell.column), [4, 4]);
+});
+
+test("題號缺號時警告缺少編號", () => {
+  const parsed = parseGuidedNotes(sheet([
+    ["題號", "作答"],
+    [1, "A"],
+    [2, "B"],
+    [4, "D"],
+  ]));
+
+  assert.deepEqual(parsed.questions.map(({ number }) => number), [1, 2, 4]);
+  assert.equal(parsed.warnings.length, 1);
+  assert.equal(parsed.warnings[0]?.code, "question-number-gap");
+  assert.equal(parsed.warnings[0]?.message, "題號缺號：3。");
+});
+
+test("題號順序打亂但沒有缺號時不警告", () => {
+  const parsed = parseGuidedNotes(sheet([
+    ["題號", "作答"],
+    [3, "C"],
+    [1, "A"],
+    [2, "B"],
+  ]));
+
+  assert.deepEqual(parsed.questions.map(({ number }) => number), [3, 1, 2]);
+  assert.equal(parsed.warnings.some(({ code }) => code === "question-number-gap"), false);
 });

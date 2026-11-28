@@ -27,3 +27,5 @@
 ## Impact
 
 涉及 `src/guided-notes/parser.ts`、匯入預覽與解析測試；`src/live-buzzer/model.ts`、`views.ts`、`socket-server.ts`、老師活動頁及相關 HTTP／Socket／視圖測試；`src/live-buzzer/result-csv.ts` 與 CSV 測試。人工測試須以 T2 新複本驗證解析預覽、老師頁線上人數及 Excel CSV 開啟結果。共同基準文件目前標示草稿 v0.4，未找到獨立的 SpecKit 組 001 規格文件；本提案以本次明列規則與 fixtures README 預期作為可檢視依據。
+
+規則來源為 SpecKit 組 repo 的 PR #7（共同需求基準 v0.6、大組會議決策單 2-14）與 PR #6（001 規格 FR-007、FR-019）及 001 審查討論（CHK014、CHK019、CHK021、CHK028、CHK033）；v0.6 尚未合併至 SpecKit main，本 repo 的 docs/共同需求基準.md 仍為 v0.4。

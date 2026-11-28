@@ -62,22 +62,29 @@ function findHeader(sheet: GridSheet, options: ParseOptions): HeaderLocation {
 
   for (let row = 1; row <= Math.min(scanRows, sheet.rows.length); row += 1) {
     const values = sheet.rows[row - 1] ?? [];
-    let questionColumn: number | undefined;
+    const questionColumns: number[] = [];
     let descriptionColumn: number | undefined;
-    let answerColumn: number | undefined;
+    const answerColumns: number[] = [];
 
     for (let column = 1; column <= values.length; column += 1) {
       const value = values[column - 1] ?? null;
-      if (questionColumn === undefined && headerMatches(value, keywords.question)) {
-        questionColumn = column;
+      if (headerMatches(value, keywords.question)) {
+        questionColumns.push(column);
       }
       if (descriptionColumn === undefined && headerMatches(value, keywords.description)) {
         descriptionColumn = column;
       }
-      if (answerColumn === undefined && headerMatches(value, keywords.answer)) {
-        answerColumn = column;
+      if (headerMatches(value, keywords.answer)) {
+        answerColumns.push(column);
       }
     }
+
+    const questionColumn = questionColumns.find((candidate) =>
+      answerColumns.some((answerCandidate) => answerCandidate !== candidate),
+    );
+    const answerColumn = questionColumn === undefined
+      ? undefined
+      : answerColumns.find((candidate) => candidate !== questionColumn);
 
     if (questionColumn !== undefined && answerColumn !== undefined) {
       const answerRange = rangeAt(sheet.mergedRanges, row, answerColumn);
@@ -128,9 +135,19 @@ function rowHasContent(sheet: GridSheet, row: number, header: HeaderLocation): b
   return false;
 }
 
+function firstContentCell(sheet: GridSheet, row: number, header: HeaderLocation): LocatedCell {
+  if (header.descriptionColumn !== undefined && hasContent(getCellValue(sheet, row, header.descriptionColumn))) {
+    return location(sheet, row, header.descriptionColumn);
+  }
+  for (let column = header.answerStartColumn; column <= header.answerEndColumn; column += 1) {
+    if (hasContent(getCellValue(sheet, row, column))) return location(sheet, row, column);
+  }
+  return location(sheet, row, header.questionColumn);
+}
+
 function subquestionLabel(value: CellValue): number | undefined {
   if (typeof value !== "string") return undefined;
-  const match = /^\((\d+)\)$/u.exec(value.normalize("NFKC").trim());
+  const match = /^\(\s*(\d+)\s*\)/u.exec(value.normalize("NFKC").trim());
   if (!match) return undefined;
   const number = Number(match[1]);
   return Number.isSafeInteger(number) && number > 0 ? number : undefined;
@@ -228,6 +245,7 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
   const questions: ParsedQuestion[] = [];
   const warnings: ParseWarning[] = [];
   let currentQuestion: ParsedQuestion | undefined;
+  let skippingInvalidQuestion = false;
 
   for (let row = header.row + 1; row <= sheet.rows.length; row += 1) {
     const questionValue = getCellValue(sheet, row, header.questionColumn);
@@ -240,12 +258,17 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
     if (hasContent(questionValue) && !isContinuationOfMergedQuestion) {
       const number = normalizeQuestionNumber(questionValue);
       if (number === undefined) {
-        throw new GuidedNotesParseError(
-          "question-number-invalid",
-          `題號無法解析：${String(questionValue)}（${sheet.name}!${toA1({ row, column: header.questionColumn })}）。`,
-          [location(sheet, row, header.questionColumn)],
-        );
+        const cell = location(sheet, row, header.questionColumn);
+        warnings.push({
+          code: "question-number-invalid",
+          message: `題號無法解析：${String(questionValue)}（${sheet.name}!${toA1(cell)}），已略過該題及後續同題列。`,
+          cell,
+        });
+        currentQuestion = undefined;
+        skippingInvalidQuestion = true;
+        continue;
       }
+      skippingInvalidQuestion = false;
       currentQuestion = {
         number,
         numberCell: location(sheet, row, header.questionColumn),
@@ -258,11 +281,14 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
       };
       questions.push(currentQuestion);
     } else if (meaningful && currentQuestion === undefined) {
-      throw new GuidedNotesParseError(
-        "question-without-number",
-        `題號欄空白但偵測到題目內容（${sheet.name}!${toA1({ row, column: header.questionColumn })}）。`,
-        [location(sheet, row, header.questionColumn)],
-      );
+      if (skippingInvalidQuestion) continue;
+      const cell = firstContentCell(sheet, row, header);
+      warnings.push({
+        code: "content-before-first-question",
+        message: `第一個有效題號前的內容已略過（${sheet.name}!${toA1(cell)}）。`,
+        cell,
+      });
+      continue;
     }
 
     const shouldCreateSubquestion = meaningful || (hasContent(questionValue) && !isContinuationOfMergedQuestion);
@@ -298,6 +324,23 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
 
   if (questions.length === 0) {
     throw new GuidedNotesParseError("no-questions", "沒有偵測到題目。表頭下方沒有可解析的題目。");
+  }
+
+  const orderedNumbers = [...new Set(questions.map(({ number }) => number))].sort((left, right) => left - right);
+  let previousNumber = 0;
+  for (const questionNumber of orderedNumbers) {
+    if (questionNumber > previousNumber + 1) {
+      const firstMissing = previousNumber + 1;
+      const lastMissing = questionNumber - 1;
+      const range = firstMissing === lastMissing ? String(firstMissing) : `${firstMissing}～${lastMissing}`;
+      const question = questions.find(({ number }) => number === questionNumber)!;
+      warnings.push({
+        code: "question-number-gap",
+        message: `題號缺號：${range}。`,
+        cell: question.numberCell,
+      });
+    }
+    previousNumber = questionNumber;
   }
 
   return { sheetName: sheet.name, headerRow: header.row, questions, warnings };
