@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { toA1 } from "./coordinates.ts";
-import type { LocatedCell, ParseResult, ParseWarning, ParsedQuestion } from "./model.ts";
+import type { CellValue, LocatedCell, ParseResult, ParseWarning, ParsedQuestion } from "./model.ts";
 
 export interface PreviewCell {
   readonly sheetName: string;
@@ -19,6 +19,8 @@ export interface PreviewSubquestion {
 
 export interface PreviewQuestion {
   readonly number: number;
+  readonly numberCell?: PreviewCell;
+  readonly numberCellValue?: CellValue;
   readonly description: string;
   readonly type: "single" | "group";
   readonly subquestions: readonly PreviewSubquestion[];
@@ -68,6 +70,8 @@ function previewCell(cell: LocatedCell): PreviewCell {
 function previewQuestion(question: ParsedQuestion): PreviewQuestion {
   return {
     number: question.number,
+    numberCell: previewCell(question.numberCell),
+    numberCellValue: question.numberCellValue,
     description: question.description,
     type: question.type,
     subquestions: question.subquestions.map((subquestion) => ({

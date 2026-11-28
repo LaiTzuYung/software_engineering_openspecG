@@ -38,6 +38,7 @@ export interface ParsedSubquestion {
 export interface ParsedQuestion {
   readonly number: number;
   readonly numberCell: LocatedCell;
+  readonly numberCellValue: CellValue;
   readonly description: string;
   readonly subquestions: readonly ParsedSubquestion[];
   readonly type: "single" | "group";

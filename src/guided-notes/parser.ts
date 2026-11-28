@@ -274,6 +274,21 @@ export function replaceAnswerMarkers(value: string, answer: string): string {
   return result + value.slice(end);
 }
 
+export function matchesAnswerMarkerState(template: string, currentValue: string): boolean {
+  const ranges = markerRanges(template);
+  if (ranges.length === 0) return false;
+  if (markerRanges(currentValue).length > 0) return true;
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  let pattern = "^";
+  let end = 0;
+  for (const range of ranges) {
+    pattern += escape(template.slice(end, range.start)) + "[\\s\\S]*?";
+    end = range.end;
+  }
+  pattern += escape(template.slice(end)) + "$";
+  return new RegExp(pattern, "u").test(currentValue);
+}
+
 function parseMarkerMode(sheet: GridSheet, header: HeaderLocation): ParseResult {
   const questions: ParsedQuestion[] = [];
   const warnings: ParseWarning[] = [];
@@ -308,7 +323,7 @@ function parseMarkerMode(sheet: GridSheet, header: HeaderLocation): ParseResult 
         skippingInvalidQuestion = true;
       } else {
         skippingInvalidQuestion = false;
-        currentQuestion = { number, numberCell: location(sheet, row, header.questionColumn), description: header.descriptionColumn === undefined ? "" : stringValue(getCellValue(sheet, row, header.descriptionColumn)), subquestions: [], type: "single" };
+        currentQuestion = { number, numberCell: location(sheet, row, header.questionColumn), numberCellValue: questionValue, description: header.descriptionColumn === undefined ? "" : stringValue(getCellValue(sheet, row, header.descriptionColumn)), subquestions: [], type: "single" };
         questions.push(currentQuestion);
       }
     }
@@ -380,6 +395,7 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
       currentQuestion = {
         number,
         numberCell: location(sheet, row, header.questionColumn),
+        numberCellValue: questionValue,
         description:
           header.descriptionColumn === undefined
             ? ""
