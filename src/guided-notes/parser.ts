@@ -10,6 +10,7 @@ import {
   GuidedNotesParseError,
   type CellRange,
   type CellValue,
+  type AnswerMarkerTemplate,
   type GridSheet,
   type LocatedCell,
   type ParseResult,
@@ -240,8 +241,130 @@ function attachSubquestion(
   return { ...question, subquestions, type: subquestions.length === 1 ? "single" : "group" };
 }
 
+function markerRanges(value: string): Array<{ start: number; end: number }> {
+  let normalized = "";
+  const offsets: number[] = [];
+  for (let index = 0; index < value.length;) {
+    const point = String.fromCodePoint(value.codePointAt(index)!);
+    const width = point.length;
+    for (const char of point.normalize("NFKC")) {
+      if (/\s/u.test(char)) continue;
+      normalized += char;
+      offsets.push(index);
+    }
+    index += width;
+  }
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const match of normalized.matchAll(/\{\{答\}\}/gu)) {
+    const startIndex = match.index!;
+    const endIndex = startIndex + match[0].length - 1;
+    ranges.push({ start: offsets[startIndex]!, end: offsets[endIndex]! + String.fromCodePoint(value.codePointAt(offsets[endIndex]!)!).length });
+  }
+  return ranges;
+}
+
+export function replaceAnswerMarkers(value: string, answer: string): string {
+  const ranges = markerRanges(value);
+  let result = "";
+  let end = 0;
+  for (const range of ranges) {
+    result += value.slice(end, range.start) + answer;
+    end = range.end;
+  }
+  return result + value.slice(end);
+}
+
+export function matchesAnswerMarkerState(template: string, currentValue: string): boolean {
+  const ranges = markerRanges(template);
+  if (ranges.length === 0) return false;
+  if (markerRanges(currentValue).length > 0) return true;
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  let pattern = "^";
+  let end = 0;
+  for (const range of ranges) {
+    pattern += escape(template.slice(end, range.start)) + "[\\s\\S]*?";
+    end = range.end;
+  }
+  pattern += escape(template.slice(end)) + "$";
+  return new RegExp(pattern, "u").test(currentValue);
+}
+
+function parseMarkerMode(sheet: GridSheet, header: HeaderLocation): ParseResult {
+  const questions: ParsedQuestion[] = [];
+  const warnings: ParseWarning[] = [];
+  const templates: AnswerMarkerTemplate[] = [];
+  let currentQuestion: ParsedQuestion | undefined;
+  let skippingInvalidQuestion = false;
+  const markersByRow = new Map<number, Array<{ column: number; value: string; ranges: Array<{ start: number; end: number }> }>>();
+  for (let row = header.row + 1; row <= sheet.rows.length; row += 1) {
+    const values = sheet.rows[row - 1] ?? [];
+    for (let column = 1; column <= values.length; column += 1) {
+      const value = values[column - 1];
+      if (typeof value !== "string") continue;
+      const ranges = markerRanges(value);
+      if (ranges.length) {
+        const list = markersByRow.get(row) ?? [];
+        list.push({ column, value, ranges });
+        markersByRow.set(row, list);
+      }
+    }
+  }
+
+  for (let row = header.row + 1; row <= sheet.rows.length; row += 1) {
+    const questionValue = getCellValue(sheet, row, header.questionColumn);
+    const questionRange = rangeAt(sheet.mergedRanges, row, header.questionColumn);
+    const mergedContinuation = questionRange !== undefined && questionRange.start.row < row;
+    if (hasContent(questionValue) && !mergedContinuation) {
+      const number = normalizeQuestionNumber(questionValue);
+      if (number === undefined) {
+        const cell = location(sheet, row, header.questionColumn);
+        warnings.push({ code: "question-number-invalid", message: `題號無法解析：${String(questionValue)}（${sheet.name}!${toA1(cell)}），已略過該題及後續同題列。`, cell });
+        currentQuestion = undefined;
+        skippingInvalidQuestion = true;
+      } else {
+        skippingInvalidQuestion = false;
+        currentQuestion = { number, numberCell: location(sheet, row, header.questionColumn), numberCellValue: questionValue, description: header.descriptionColumn === undefined ? "" : stringValue(getCellValue(sheet, row, header.descriptionColumn)), subquestions: [], type: "single" };
+        questions.push(currentQuestion);
+      }
+    }
+    const markers = markersByRow.get(row) ?? [];
+    for (const marker of markers) {
+      const cell = location(sheet, row, marker.column);
+      if (currentQuestion === undefined || skippingInvalidQuestion) {
+        const before = questions.length === 0 && !skippingInvalidQuestion;
+        warnings.push({
+          code: before ? "answer-marker-before-question" : "answer-marker-unassigned",
+          message: `${before ? "第一個有效題號前" : "無法歸屬題號下"}的答案標記已略過（${sheet.name}!${toA1(cell)}）。`,
+          cell,
+        });
+        continue;
+      }
+      const labelNumber = subquestionLabel(marker.value.slice(0, marker.ranges[0]!.start));
+      const fallbackLabel = subquestionLabel(getCellValue(sheet, row, header.answerStartColumn));
+      const number = labelNumber ?? fallbackLabel ?? currentQuestion.subquestions.length + 1;
+      const updated = attachSubquestion(currentQuestion, { number, answerCell: cell, ...(fallbackLabel !== undefined && labelNumber === undefined ? { labelCell: location(sheet, row, header.answerStartColumn) } : {}) }, warnings);
+      currentQuestion = updated;
+      questions[questions.length - 1] = updated;
+      templates.push({ questionNumber: updated.number, subquestionNumber: number, answerCell: cell, originalValue: marker.value });
+    }
+  }
+  for (const question of questions) {
+    if (question.subquestions.length === 0) warnings.push({ code: "question-without-answer-marker", message: `第 ${question.number} 題沒有答案標記（${sheet.name}!${toA1(question.numberCell)}）。`, cell: question.numberCell });
+  }
+  const duplicates = duplicateNumberErrors(questions);
+  if (duplicates.size) {
+    const allLocations = [...duplicates.values()].flat();
+    const detail = [...duplicates].map(([number, cells]) => `${number}: ${cells.map((cell) => `${cell.sheetName}!${toA1(cell)}`).join("、")}`).join("；");
+    throw new GuidedNotesParseError("question-number-duplicate", `題號重複：${detail}。`, allLocations);
+  }
+  if (!questions.length) throw new GuidedNotesParseError("no-questions", "沒有偵測到題目。表頭下方沒有可解析的題目。");
+  return { mode: "marker", sheetName: sheet.name, headerRow: header.row, questions, warnings, answerMarkerTemplates: templates };
+}
+
 export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): ParseResult {
   const header = findHeader(sheet, options);
+  const containsAnswerMarker = sheet.rows.slice(header.row).some((row) => row.some((value) => typeof value === "string" && markerRanges(value).length > 0));
+  if (containsAnswerMarker) return parseMarkerMode(sheet, header);
   const questions: ParsedQuestion[] = [];
   const warnings: ParseWarning[] = [];
   let currentQuestion: ParsedQuestion | undefined;
@@ -272,6 +395,7 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
       currentQuestion = {
         number,
         numberCell: location(sheet, row, header.questionColumn),
+        numberCellValue: questionValue,
         description:
           header.descriptionColumn === undefined
             ? ""
@@ -343,7 +467,7 @@ export function parseGuidedNotes(sheet: GridSheet, options: ParseOptions = {}): 
     previousNumber = questionNumber;
   }
 
-  return { sheetName: sheet.name, headerRow: header.row, questions, warnings };
+  return { mode: "header", sheetName: sheet.name, headerRow: header.row, questions, warnings, answerMarkerTemplates: [] };
 }
 
 export type { CellRange };

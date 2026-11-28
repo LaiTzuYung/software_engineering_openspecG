@@ -58,6 +58,22 @@ test("未確認時只有記憶體預覽且沒有 JSON 檔；確認後記憶體�
   });
 });
 
+test("匯入持久化定位模式與標記替換模板，舊題目集缺省採表頭模式", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const marked: GridSheet = { name: "標記表", rows: [["題號", "題目", "作答"], [1, "說明", "答：{{答}}"]], mergedRanges: [] };
+    const service = new GuidedNotesImportService(directory);
+    const preview = service.preview(parseGuidedNotes(marked));
+    const stored = await service.confirm(preview.id);
+    assert.equal(stored.locatingMode, "marker");
+    assert.equal(stored.answerMarkerTemplates?.[0]?.originalValue, "答：{{答}}");
+    assert.equal((await service.readPersistedQuestionSet(preview.id)).answerMarkerTemplates?.[0]?.answerCell.address, "C2");
+    const legacy = { ...stored } as Record<string, unknown>;
+    delete legacy.locatingMode;
+    delete legacy.answerMarkerTemplates;
+    assert.equal(legacy.locatingMode ?? "header", "header");
+  });
+});
+
 test("Google 匯入預覽與確認後的題目集保留 spreadsheet ID 和 gid", async () => {
   await withTemporaryDirectory(async (directory) => {
     const service = new GuidedNotesImportService(directory);

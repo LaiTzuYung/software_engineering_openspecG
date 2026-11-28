@@ -3,9 +3,9 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getCellValue } from "./coordinates.ts";
 import type { GoogleSpreadsheetSource, GuidedNotesQuestionSet, PreviewCell } from "./import-service.ts";
-import type { CellValue, GridSheet, ParsedSubquestion } from "./model.ts";
+import type { CellValue, GridSheet, LocatedCell, ParseResult, ParsedQuestion, ParsedSubquestion } from "./model.ts";
 import type { GoogleSheetsValueRange } from "./google-sheets-adapter.ts";
-import { parseGuidedNotes } from "./parser.ts";
+import { matchesAnswerMarkerState, parseGuidedNotes, replaceAnswerMarkers } from "./parser.ts";
 
 export interface PlannedSpreadsheetAnswer {
   readonly questionNumber: number;
@@ -24,6 +24,7 @@ export interface SpreadsheetExportTarget {
 
 export interface SpreadsheetExportPreview {
   readonly id: string;
+  readonly locatingMethod: string;
   readonly targets: readonly SpreadsheetExportTarget[];
 }
 
@@ -216,6 +217,9 @@ async function readAndCompare(
   }
 
   const sheet = await readSpreadsheet(sourceUrl(source));
+  if (questionSet.locatingMode === "marker") {
+    return { sheet, parsed: validateMarkerQuestionSet(questionSet, sheet) };
+  }
   let parsed: ReturnType<typeof parseGuidedNotes>;
   try {
     parsed = parseGuidedNotes(sheet);
@@ -225,6 +229,54 @@ async function readAndCompare(
   }
   compareQuestionSetStructure(questionSet, parsed);
   return { sheet, parsed };
+}
+
+function toLocatedCell(cell: PreviewCell): LocatedCell {
+  return { sheetName: cell.sheetName, row: cell.row, column: cell.column };
+}
+
+function validateMarkerQuestionSet(questionSet: GuidedNotesQuestionSet, sheet: GridSheet): ParseResult {
+  if (sheet.name !== questionSet.sheetName) {
+    throw new SpreadsheetStructureMismatchError(`工作表名稱不同：匯入時為「${questionSet.sheetName}」，目前為「${sheet.name}」。`);
+  }
+  const questions: ParsedQuestion[] = questionSet.questions.map((question) => {
+    const numberCell = question.numberCell;
+    if (numberCell === undefined || question.numberCellValue === undefined) {
+      throw new SpreadsheetStructureMismatchError(`第 ${question.number} 題缺少匯入時的題號格快照，請重新匯入。`);
+    }
+    const currentNumber = getCellValue(sheet, numberCell.row, numberCell.column);
+    if (currentNumber !== question.numberCellValue) {
+      throw new SpreadsheetStructureMismatchError(
+        `第 ${question.number} 題題號格不同：匯入時為「${numberCell.sheetName}!${numberCell.address}=${String(question.numberCellValue)}」，目前為「${numberCell.sheetName}!${numberCell.address}=${String(currentNumber ?? "（空白）")}」。請先還原再回寫。`,
+      );
+    }
+    const subquestions: ParsedSubquestion[] = question.subquestions.map((subquestion) => {
+      const answerCell = subquestion.answerCell;
+      const template = questionSet.answerMarkerTemplates?.find((item) =>
+        item.questionNumber === question.number && item.subquestionNumber === subquestion.number &&
+        item.answerCell.sheetName === answerCell.sheetName && item.answerCell.address === answerCell.address);
+      const currentValue = getCellValue(sheet, answerCell.row, answerCell.column);
+      if (template === undefined || typeof currentValue !== "string" || !matchesAnswerMarkerState(template.originalValue, currentValue)) {
+        throw new SpreadsheetStructureMismatchError(
+          `第 ${question.number} 題小題 ${subquestion.number} 的作答格「${answerCell.sheetName}!${answerCell.address}」內容與匯入標記模板不同，請先還原再回寫。`,
+        );
+      }
+      return {
+        number: subquestion.number,
+        answerCell: toLocatedCell(answerCell),
+        ...(subquestion.labelCell === undefined ? {} : { labelCell: toLocatedCell(subquestion.labelCell) }),
+      };
+    });
+    return {
+      number: question.number,
+      numberCell: toLocatedCell(numberCell),
+      numberCellValue: question.numberCellValue,
+      description: question.description,
+      type: question.type,
+      subquestions,
+    };
+  });
+  return { mode: "marker", sheetName: sheet.name, headerRow: 0, questions, warnings: [], answerMarkerTemplates: [] };
 }
 
 function findSubquestion(
@@ -275,16 +327,22 @@ export class SpreadsheetExportPreviewService {
       }
       const cell = toPreviewCell(subquestion.answerCell);
       const currentValue = getCellValue(sheet, cell.row, cell.column);
+      const template = questionSet.answerMarkerTemplates?.find((item) =>
+        item.questionNumber === answer.questionNumber && item.subquestionNumber === answer.subquestionNumber &&
+        item.answerCell.address === cell.address && item.answerCell.sheetName === cell.sheetName);
+      const writtenValue = template === undefined
+        ? answer.answer
+        : replaceAnswerMarkers(template.originalValue, answer.answer);
       return {
         questionNumber: answer.questionNumber,
         subquestionNumber: answer.subquestionNumber,
         cell,
         currentValue,
-        answer: answer.answer,
-        status: currentValue === answer.answer ? "內容相同略過" : "將寫入",
+        answer: writtenValue,
+        status: currentValue === writtenValue ? "內容相同略過" : "將寫入",
       };
     });
-    const preview: SpreadsheetExportPreview = { id: randomUUID(), targets };
+    const preview: SpreadsheetExportPreview = { id: randomUUID(), locatingMethod: questionSet.locatingMode === "marker" ? "定位方式：{{答}} 標記" : "定位方式：表頭", targets };
     this.pending.set(preview.id, {
       questionSet: structuredClone(questionSet),
       preview: structuredClone(preview),
@@ -342,7 +400,9 @@ export class SpreadsheetExportPreviewService {
         subquestionNumber: target.subquestionNumber,
         sheetName: target.cell.sheetName,
         address: target.cell.address,
-        originalValue: target.currentValue,
+        originalValue: stored?.questionSet.answerMarkerTemplates?.find((template) =>
+          template.questionNumber === target.questionNumber && template.subquestionNumber === target.subquestionNumber &&
+          template.answerCell.address === target.cell.address)?.originalValue ?? target.currentValue,
         writtenValue: target.answer,
       })),
     };

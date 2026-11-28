@@ -38,6 +38,7 @@ export interface ParsedSubquestion {
 export interface ParsedQuestion {
   readonly number: number;
   readonly numberCell: LocatedCell;
+  readonly numberCellValue: CellValue;
   readonly description: string;
   readonly subquestions: readonly ParsedSubquestion[];
   readonly type: "single" | "group";
@@ -49,16 +50,28 @@ export interface ParseWarning {
     | "duplicate-answer-cell"
     | "question-number-invalid"
     | "content-before-first-question"
-    | "question-number-gap";
+    | "question-number-gap"
+    | "answer-marker-before-question"
+    | "answer-marker-unassigned"
+    | "question-without-answer-marker";
   readonly message: string;
   readonly cell: LocatedCell;
 }
 
+export interface AnswerMarkerTemplate {
+  readonly questionNumber: number;
+  readonly subquestionNumber: number;
+  readonly answerCell: LocatedCell;
+  readonly originalValue: string;
+}
+
 export interface ParseResult {
+  readonly mode: "header" | "marker";
   readonly sheetName: string;
   readonly headerRow: number;
   readonly questions: readonly ParsedQuestion[];
   readonly warnings: readonly ParseWarning[];
+  readonly answerMarkerTemplates: readonly AnswerMarkerTemplate[];
 }
 
 export type ParseErrorCode =

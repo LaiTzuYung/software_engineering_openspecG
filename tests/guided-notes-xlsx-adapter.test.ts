@@ -51,6 +51,38 @@ test("T2-group fixture 預期兩題組及兩單題", async () => {
   assert.deepEqual(result.questions.slice(2).map((question) => answerCells(question)[0]), ["G11", "G13"]);
 });
 
+test("T6-marker fixture 以標記定位且解析結果與 T2 完全相同", async () => {
+  const { result: t6 } = await parseFixture("T6-marker.xlsx");
+  const { result: t2 } = await parseFixture("T2-group.xlsx");
+  assert.equal(t6.mode, "marker");
+  assert.deepEqual(t6.questions, t2.questions);
+  assert.deepEqual(t6.warnings, t2.warnings);
+});
+
+test("T1 至 T5 無標記時定位模式、題型、作答格、標籤與警告符合 README 基準", async () => {
+  const expected: Record<string, { answers: string[][]; labels: (string | null)[][] }> = {
+    "T1-single.xlsx": { answers: [["G5"], ["G7"], ["G9"], ["G11"], ["G13"], ["G15"]], labels: [[null], [null], [null], [null], [null], [null]] },
+    "T2-group.xlsx": { answers: [["H5", "H6"], ["H8", "H9"], ["G11"], ["G13"]], labels: [["G5", "G6"], ["G8", "G9"], [null], [null]] },
+    "T3-shifted.xlsx": { answers: [["I3", "I4"], ["I6", "I7"], ["H9"], ["H11"]], labels: [["H3", "H4"], ["H6", "H7"], [null], [null]] },
+    "T4-large.xlsx": { answers: [["G5"], ["G6"], ["H7", "H8", "H9"], ["G10"], ["G11"], ["H12", "H13"], ["G14"], ["G15"], ["G16"], ["G17"], ["G18"], ["G19"]], labels: [[null], [null], ["G7", "G8", "G9"], [null], [null], ["G12", "G13"], [null], [null], [null], [null], [null], [null]] },
+  };
+  for (const [name, baseline] of Object.entries(expected)) {
+    const { result } = await parseFixture(name);
+    assert.equal(result.mode, "header", name);
+    assert.deepEqual(result.questions.map(({ subquestions }) => subquestions.map(({ answerCell }) => toA1(answerCell))), baseline.answers, name);
+    assert.deepEqual(result.questions.map(({ subquestions }) => subquestions.map(({ labelCell }) => labelCell ? toA1(labelCell) : null)), baseline.labels, name);
+    assert.equal(result.warnings.length, 0, name);
+  }
+  for (const [name, code, message] of [
+    ["T5-errors-no-header.xlsx", "header-not-found", "找不到表頭：前 20 列沒有同時包含題號與作答。"],
+    ["T5-errors-duplicate.xlsx", "question-number-duplicate", "題號重複：3: 學習單!B9、學習單!B11。"],
+  ] as const) {
+    const workbook = await readXlsxFile(fixture(name));
+    assert.throws(() => parseGuidedNotes(workbook.sheets[0]!), (error: unknown) =>
+      error instanceof GuidedNotesParseError && error.code === code && error.message === message, name);
+  }
+});
+
 test("T3-shifted fixture 預期位移後題組與單題位置", async () => {
   const { result } = await parseFixture("T3-shifted.xlsx");
   assert.equal(result.questions.length, 4);

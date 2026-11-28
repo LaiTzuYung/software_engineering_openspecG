@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { columnNumberToLetters, rangeAt, toA1 } from "../src/guided-notes/coordinates.ts";
-import { parseGuidedNotes } from "../src/guided-notes/parser.ts";
+import { parseGuidedNotes, replaceAnswerMarkers } from "../src/guided-notes/parser.ts";
 import { GuidedNotesParseError, type CellRange, type GridSheet } from "../src/guided-notes/model.ts";
 
 function sheet(
@@ -278,4 +278,43 @@ test("題號順序打亂但沒有缺號時不警告", () => {
 
   assert.deepEqual(parsed.questions.map(({ number }) => number), [3, 1, 2]);
   assert.equal(parsed.warnings.some(({ code }) => code === "question-number-gap"), false);
+});
+
+test("答案標記接受全形及含空白 token，並以標記格前綴小題標籤", () => {
+  const parsed = parseGuidedNotes(sheet([
+    ["題號", "題目", "作答", null, null],
+    [1, "題組", "（1）", "答：{{ 答 }}", null],
+    [null, "第二小題", "（2）", null, "｛｛答｝｝"],
+  ], [{ start: { row: 1, column: 3 }, end: { row: 1, column: 5 } }]));
+  assert.equal(parsed.mode, "marker");
+  assert.deepEqual(parsed.questions[0]?.subquestions.map(({ number, answerCell }) => [number, answerCell.column]), [[1, 4], [2, 5]]);
+  assert.equal(replaceAnswerMarkers("{{答}}", "D3"), "D3");
+  assert.equal(replaceAnswerMarkers("答案 {{ 答 }}／｛｛答｝｝ 後", "D3"), "答案 D3／D3 後");
+});
+
+test("答案標記歸最近有效題號且同題依列欄排序，純標記不算已有內容", () => {
+  const parsed = parseGuidedNotes(sheet([
+    ["題號", "題目", "作答", null, null],
+    [null, null, null, null, "{{答}}"],
+    [2, "題幹", null, "{{答}}", "{{答}}"],
+    [null, null, null, "{{答}}", null],
+  ]));
+  assert.deepEqual(parsed.questions[0]?.subquestions.map(({ answerCell }) => [answerCell.row, answerCell.column]), [[3, 4], [3, 5], [4, 4]]);
+  assert.equal(parsed.warnings.some(({ code }) => code === "answer-cell-already-filled"), false);
+  const preQuestion = parsed.warnings.find(({ code }) => code === "answer-marker-before-question");
+  assert.deepEqual(preQuestion?.cell, { sheetName: "工作表甲", row: 2, column: 5 });
+  assert.equal(parsed.questions[0]?.subquestions.some(({ answerCell }) => answerCell.row === 2), false);
+});
+
+test("標記模式對無效題號與缺少標記題目提供帶位置警告", () => {
+  const parsed = parseGuidedNotes(sheet([
+    ["題號", "題目", "作答", null],
+    [1, "有標記題", "{{答}}", null],
+    ["Q-?", "無效題", null, "{{答}}"],
+    [3, "缺少標記題", null, null],
+  ]));
+  assert.deepEqual(parsed.warnings.map(({ code, cell }) => [code, cell.row, cell.column]), [
+    ["question-number-invalid", 3, 1], ["answer-marker-unassigned", 3, 4], ["question-without-answer-marker", 4, 1],
+  ]);
+  assert.deepEqual(parsed.questions.map(({ number }) => number), [1, 3]);
 });

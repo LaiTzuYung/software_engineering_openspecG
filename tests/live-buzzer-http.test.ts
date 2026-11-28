@@ -72,7 +72,8 @@ test("回寫預覽 API 顯示 A1、目前值、預計值與中文狀態，並以
     await makeEndedExportActivity(app);
     const previewResponse = await fetch(`${base}/api/teacher/export/preview`, { method: "POST", headers: teacherHeaders(), body: "{}" });
     assert.equal(previewResponse.status, 200);
-    const preview = (await previewResponse.json() as { preview: { id: string; targets: { cell: { address: string }; currentValue: unknown; answer: string; status: string }[] } }).preview;
+    const preview = (await previewResponse.json() as { preview: { id: string; locatingMethod: string; targets: { cell: { address: string }; currentValue: unknown; answer: string; status: string }[] } }).preview;
+    assert.equal(preview.locatingMethod, "定位方式：表頭");
     assert.deepEqual(preview.targets.map(({ cell, currentValue, answer, status }) => ({ address: cell.address, currentValue, answer, status })), [
       { address: "C2", currentValue: null, answer: "答案甲", status: "將寫入" },
     ]);
