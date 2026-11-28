@@ -20,7 +20,7 @@ function createTeacherPageHarness() {
       return element;
     },
     createElement(tag: string) {
-      return { tag, children: [] as unknown[], textContent: "", className: "", append(...children: unknown[]) { this.children.push(...children); } };
+      return { tag, children: [] as unknown[], textContent: "", className: "", style: {}, classList: { add() {} }, append(...children: unknown[]) { this.children.push(...children); } };
     },
   };
   const script = teacherPage.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
@@ -28,17 +28,28 @@ function createTeacherPageHarness() {
   const socket = {
     on(event: string, handler: (payload: unknown) => void) { socketHandlers.set(event, handler); return this; },
   };
-  const runtime = new Function("document", "io", "sessionStorage", "fetch", "Option", `${script};return {show};`)(
+  const runtime = new Function("document", "io", "sessionStorage", "fetch", "Option", `${script};return {show,renderImportPreview,renderExportPreview};`)(
     document,
     (options: unknown) => { ioCalls.push(options); return socket; },
     { getItem() { return "test-pin"; } },
     () => new Promise(() => {}),
     class Option {},
-  ) as { show: (view: unknown) => void };
-  return { elements, ioCalls, socketHandlers, show: runtime.show };
+  ) as { show: (view: unknown) => void; renderImportPreview: (preview: unknown) => void; renderExportPreview: (preview: unknown) => void };
+  return { elements, ioCalls, socketHandlers, show: runtime.show, renderImportPreview: runtime.renderImportPreview, renderExportPreview: runtime.renderExportPreview };
 }
 
+test("匯入摘要與回寫預覽都顯示定位方式及標記替換值", () => {
+  const harness = createTeacherPageHarness();
+  harness.renderImportPreview({ locatingMode: "marker", importSource: "xlsx", sheetName: "學習單", totalQuestionCount: 1, singleQuestionCount: 1, groupQuestionCount: 0, questions: [], warnings: [] });
+  const serialize = (element: any): string => `${element.textContent}${element.children.map(serialize).join("")}`;
+  assert.match(serialize(harness.elements.get("#import-preview")), /定位方式：\{\{答\}\} 標記/u);
+  harness.renderExportPreview({ locatingMethod: "定位方式：{{答}} 標記", targets: [{ cell: { sheetName: "學習單", address: "G11" }, currentValue: "答：{{答}}", answer: "答：D3", status: "將寫入" }] });
+  assert.match(serialize(harness.elements.get("#export-preview")), /定位方式：\{\{答\}\} 標記/u);
+  assert.match(serialize(harness.elements.get("#export-preview")), /答：\{\{答\}\}.*答：D3/u);
+});
+
 test("teacher and student pages render ranking controls, results and no-success reasons", () => {
+  assert.match(teacherPage, /preview\.locatingMethod/u);
   assert.match(teacherPage, /id="create"[^>]*>建立活動/u);
   assert.match(teacherPage, /id="create-ranking-rule"[\s\S]*?<option value="speed">純速度<\/option>[\s\S]*?<option value="cap">均分上限<\/option>/u);
   assert.match(teacherPage, /每組最多成功 /u);

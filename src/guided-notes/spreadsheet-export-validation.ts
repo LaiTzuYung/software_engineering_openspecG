@@ -5,7 +5,7 @@ import { getCellValue } from "./coordinates.ts";
 import type { GoogleSpreadsheetSource, GuidedNotesQuestionSet, PreviewCell } from "./import-service.ts";
 import type { CellValue, GridSheet, ParsedSubquestion } from "./model.ts";
 import type { GoogleSheetsValueRange } from "./google-sheets-adapter.ts";
-import { parseGuidedNotes } from "./parser.ts";
+import { parseGuidedNotes, replaceAnswerMarkers } from "./parser.ts";
 
 export interface PlannedSpreadsheetAnswer {
   readonly questionNumber: number;
@@ -24,6 +24,7 @@ export interface SpreadsheetExportTarget {
 
 export interface SpreadsheetExportPreview {
   readonly id: string;
+  readonly locatingMethod: string;
   readonly targets: readonly SpreadsheetExportTarget[];
 }
 
@@ -221,9 +222,17 @@ async function readAndCompare(
     parsed = parseGuidedNotes(sheet);
   } catch (error) {
     const message = error instanceof Error ? error.message : "未知解析錯誤";
-    throw new SpreadsheetStructureMismatchError(`重新解析試算表失敗：${message}`);
+    const restoreHint = questionSet.locatingMode === "marker" ? "請先還原再回寫。" : "";
+    throw new SpreadsheetStructureMismatchError(`重新解析試算表失敗：${message}${restoreHint}`);
   }
-  compareQuestionSetStructure(questionSet, parsed);
+  try {
+    compareQuestionSetStructure(questionSet, parsed);
+  } catch (error) {
+    if (questionSet.locatingMode === "marker") {
+      throw new SpreadsheetStructureMismatchError(`${error instanceof Error ? error.message : "定位結構不同。"}請先還原再回寫。`);
+    }
+    throw error;
+  }
   return { sheet, parsed };
 }
 
@@ -275,16 +284,22 @@ export class SpreadsheetExportPreviewService {
       }
       const cell = toPreviewCell(subquestion.answerCell);
       const currentValue = getCellValue(sheet, cell.row, cell.column);
+      const template = questionSet.answerMarkerTemplates?.find((item) =>
+        item.questionNumber === answer.questionNumber && item.subquestionNumber === answer.subquestionNumber &&
+        item.answerCell.address === cell.address && item.answerCell.sheetName === cell.sheetName);
+      const writtenValue = template === undefined
+        ? answer.answer
+        : replaceAnswerMarkers(template.originalValue, answer.answer);
       return {
         questionNumber: answer.questionNumber,
         subquestionNumber: answer.subquestionNumber,
         cell,
         currentValue,
-        answer: answer.answer,
-        status: currentValue === answer.answer ? "內容相同略過" : "將寫入",
+        answer: writtenValue,
+        status: currentValue === writtenValue ? "內容相同略過" : "將寫入",
       };
     });
-    const preview: SpreadsheetExportPreview = { id: randomUUID(), targets };
+    const preview: SpreadsheetExportPreview = { id: randomUUID(), locatingMethod: questionSet.locatingMode === "marker" ? "定位方式：{{答}} 標記" : "定位方式：表頭", targets };
     this.pending.set(preview.id, {
       questionSet: structuredClone(questionSet),
       preview: structuredClone(preview),
@@ -342,7 +357,9 @@ export class SpreadsheetExportPreviewService {
         subquestionNumber: target.subquestionNumber,
         sheetName: target.cell.sheetName,
         address: target.cell.address,
-        originalValue: target.currentValue,
+        originalValue: stored?.questionSet.answerMarkerTemplates?.find((template) =>
+          template.questionNumber === target.questionNumber && template.subquestionNumber === target.subquestionNumber &&
+          template.answerCell.address === target.cell.address)?.originalValue ?? target.currentValue,
         writtenValue: target.answer,
       })),
     };

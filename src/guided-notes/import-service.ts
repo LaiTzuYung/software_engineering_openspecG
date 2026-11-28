@@ -42,6 +42,13 @@ export interface GuidedNotesQuestionSet {
   readonly sheetName: string;
   readonly googleSource?: GoogleSpreadsheetSource;
   readonly importSource?: "google" | "xlsx";
+  readonly locatingMode?: "header" | "marker";
+  readonly answerMarkerTemplates?: readonly {
+    readonly questionNumber: number;
+    readonly subquestionNumber: number;
+    readonly answerCell: PreviewCell;
+    readonly originalValue: string;
+  }[];
   readonly totalQuestionCount: number;
   readonly singleQuestionCount: number;
   readonly groupQuestionCount: number;
@@ -83,6 +90,13 @@ export function createImportPreview(
     sheetName: result.sheetName,
     ...(googleSource === undefined ? {} : { googleSource }),
     importSource,
+    locatingMode: result.mode,
+    answerMarkerTemplates: result.answerMarkerTemplates.map((template) => ({
+      questionNumber: template.questionNumber,
+      subquestionNumber: template.subquestionNumber,
+      answerCell: previewCell(template.answerCell),
+      originalValue: template.originalValue,
+    })),
     totalQuestionCount: questions.length,
     singleQuestionCount: questions.filter(({ type }) => type === "single").length,
     groupQuestionCount: questions.filter(({ type }) => type === "group").length,

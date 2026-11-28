@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createImportPreview } from "../src/guided-notes/import-service.ts";
 import type { GridSheet } from "../src/guided-notes/model.ts";
@@ -16,6 +17,7 @@ import { parseGuidedNotes } from "../src/guided-notes/parser.ts";
 import { createActivityState, transitionActivityStage } from "../src/live-buzzer/model.ts";
 import { submitAnswers } from "../src/live-buzzer/submissions.ts";
 import { successfulAnswersForExport } from "../src/live-buzzer/result-export.ts";
+import { readXlsxFile } from "../src/guided-notes/xlsx-adapter.ts";
 
 function sheet(): GridSheet {
   return {
@@ -125,6 +127,58 @@ test("建立與確認快照使用服務端目標，確認會重讀並檢查預�
       error.message.includes("第 2 題小題 1") && error.message.includes("學習單!D3") &&
       error.message.includes("內容在預覽後已改變"),
   );
+});
+
+test("標記預覽保留原文並替換答案；確認寫 RAW 完整值且備份可還原標記原文", async () => {
+  let current: GridSheet = { name: "學習單", rows: [["題號", "題目", "作答"], [1, "題幹", "答：{{答}}"]], mergedRanges: [] };
+  const imported = {
+    ...createImportPreview(parseGuidedNotes(current), { spreadsheetId: "marker-sheet", gid: 9 }, "google"),
+  };
+  const service = new SpreadsheetExportPreviewService(async () => current);
+  const preview = await service.create(imported, [{ questionNumber: 1, subquestionNumber: 1, answer: "D3" }], "marker");
+  assert.equal(preview.locatingMethod, "定位方式：{{答}} 標記");
+  assert.equal(preview.targets[0]?.currentValue, "答：{{答}}");
+  assert.equal(preview.targets[0]?.answer, "答：D3");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "marker-writeback-"));
+  try {
+    let write: readonly GoogleSheetsValueRange[] = [];
+    const result = await service.confirmAndWrite(preview.id, "marker", async (_id, data) => {
+      write = data;
+      current = { ...current, rows: [["題號", "題目", "作答"], [1, "題幹", "答：D3"]] };
+      return data.length;
+    }, directory);
+    assert.deepEqual(write, [{ range: "'學習單'!C2", values: [["答：D3"]] }]);
+    const backup = JSON.parse(await readFile(result.backupPath!, "utf8")) as { targets: { originalValue: unknown; writtenValue: unknown }[] };
+    assert.deepEqual(backup.targets.map(({ originalValue, writtenValue }) => [originalValue, writtenValue]), [["答：{{答}}", "答：D3"]]);
+    const writes: GoogleSheetsValueRange[] = [];
+    const restored = await service.restoreLatest(imported, async () => current, async (_id, data) => { writes.push(...data); current = { ...current, rows: [["題號", "題目", "作答"], [1, "題幹", data[0]!.values[0]![0] as string]] }; return 1; }, directory);
+    assert.deepEqual(restored.restored, [{ address: "學習單!C2" }]);
+    assert.deepEqual(writes, [{ range: "'學習單'!C2", values: [["答：{{答}}"]] }]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("標記已替換時只在題目與作答座標仍符合匯入快照時容許 Q11 重定位", async () => {
+  const marked: GridSheet = { name: "學習單", rows: [["題號", "題目", "作答", null], [1, "題幹", "{{答}}", null]], mergedRanges: [] };
+  const imported = { ...createImportPreview(parseGuidedNotes(marked), { spreadsheetId: "marker-sheet", gid: 9 }, "google") };
+  const written: GridSheet = { ...marked, rows: [["題號", "題目", "作答", null], [1, "題幹", "D3", null]] };
+  const good = new SpreadsheetExportPreviewService(async () => written);
+  const preview = await good.create(imported, [{ questionNumber: 1, subquestionNumber: 1, answer: "E4" }]);
+  assert.equal(preview.targets[0]?.answer, "E4");
+
+  const moved: GridSheet = { name: "學習單", rows: [["題號", "題目", null, "作答"], [1, "題幹", null, "D3"]], mergedRanges: [] };
+  await assert.rejects(new SpreadsheetExportPreviewService(async () => moved).create(imported, [
+    { questionNumber: 1, subquestionNumber: 1, answer: "E4" },
+  ]), /請先還原再回寫/u);
+});
+
+test("T6 的 G11 前綴變體預覽原文與保留前綴的完整預計值", async () => {
+  const workbook = await readXlsxFile(fileURLToPath(new URL("./fixtures/guided-notes/T6-marker.xlsx", import.meta.url)));
+  const fixtureSheet = workbook.sheets[0]!;
+  const current: GridSheet = { ...fixtureSheet, rows: fixtureSheet.rows.map((row, index) => index === 10 ? row.map((value, column) => column === 6 ? "答：{{答}}" : value) : row) };
+  const questionSet = { ...createImportPreview(parseGuidedNotes(current), { spreadsheetId: "T6", gid: 1 }, "google") };
+  const service = new SpreadsheetExportPreviewService(async () => current);
+  const preview = await service.create(questionSet, [{ questionNumber: 3, subquestionNumber: 1, answer: "D3" }]);
+  assert.deepEqual(preview.targets.map(({ cell, currentValue, answer }) => [cell.address, currentValue, answer]), [["G11", "答：{{答}}", "答：D3"]]);
 });
 
 test("預覽建立時找不到題目集指定的小題會以中文中止", async () => {
