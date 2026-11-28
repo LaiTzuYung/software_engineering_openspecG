@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { io as createClient } from "socket.io-client";
-import { submitAnswers } from "../src/live-buzzer/submissions.ts";
+import { getQuestionResults, submitAnswers } from "../src/live-buzzer/submissions.ts";
 import { createLiveBuzzerServer } from "../src/live-buzzer/http-server.ts";
 import { GuidedNotesImportService } from "../src/guided-notes/import-service.ts";
 import type { GuidedNotesQuestionSet } from "../src/guided-notes/import-service.ts";
@@ -38,6 +38,7 @@ async function withServer<T>(action: (baseUrl: string, directory: string, app: R
   const app = createLiveBuzzerServer({
     teacherPin: PIN,
     dataDirectory: questionDirectory,
+    activityDataDirectory: directory,
     importService: new GuidedNotesImportService(questionDirectory),
     readSpreadsheet: options.readSpreadsheet ?? (async () => mockSheet),
     ...(options.writeSpreadsheetValues === undefined ? {} : { writeSpreadsheetValues: options.writeSpreadsheetValues }),
@@ -95,6 +96,45 @@ test("回寫預覽 API 顯示 A1、目前值、預計值與中文狀態，並以
     assert.equal(backup.status, "pending", "batchUpdate must run only after the pending backup is persisted");
     return 1;
   } });
+});
+
+test("Socket 幾乎同時提交仍按同步序號判定，且推播前提交已保存", async () => {
+  await withServer(async (base, questionDirectory, app) => {
+    const activity = app.manager.create(fixtureSet(), { activityCode: "2468", groupNames: ["紅隊", "藍隊"] });
+    const started = await fetch(`${base}/api/teacher/start`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(started.status, 200);
+
+    const red = createClient(base, { transports: ["websocket"], reconnection: false, auth: { role: "student", sessionToken: "team-a-session" } });
+    const blue = createClient(base, { transports: ["websocket"], reconnection: false, auth: { role: "student", sessionToken: "team-b-session" } });
+    const redInitial = new Promise<void>((resolve) => red.once("activity:student-view", () => resolve()));
+    const blueInitial = new Promise<void>((resolve) => blue.once("activity:student-view", () => resolve()));
+    red.connect();
+    blue.connect();
+    await Promise.all([redInitial, blueInitial]);
+    try {
+      const redUpdate = new Promise<void>((resolve) => red.once("activity:student-view", () => resolve()));
+      const blueUpdate = new Promise<void>((resolve) => blue.once("activity:student-view", () => resolve()));
+      const [redAck, blueAck] = await Promise.all([
+        red.emitWithAck("student:submit", { questionNumber: 1, answers: { 1: "紅隊近同時答案" } }),
+        blue.emitWithAck("student:submit", { questionNumber: 1, answers: { 1: "藍隊近同時答案" } }),
+      ]);
+      assert.deepEqual(redAck, { ok: true, questionNumber: 1 });
+      assert.deepEqual(blueAck, { ok: true, questionNumber: 1 });
+      await Promise.all([redUpdate, blueUpdate]);
+
+      const snapshot = JSON.parse(await readFile(path.join(path.dirname(questionDirectory), "live-buzzer-activity.json"), "utf8")) as {
+        activity: { submissions: { groupId: string; sequence: number; answers: Record<number, string> }[]; nextSubmissionSequence: number };
+      };
+      const submissions = [...snapshot.activity.submissions].sort((left, right) => left.sequence - right.sequence);
+      assert.deepEqual(submissions.map(({ sequence }) => sequence), [1, 2]);
+      assert.equal(snapshot.activity.nextSubmissionSequence, 3);
+      assert.equal(getQuestionResults(activity)[0]?.successfulGroup?.id, submissions[0]?.groupId);
+      assert.ok(submissions.every(({ answers }) => Object.values(answers).some((answer) => answer.includes("近同時答案"))));
+    } finally {
+      red.disconnect();
+      blue.disconnect();
+    }
+  });
 });
 
 test("公開大螢幕頁與 HTTP 狀態端點只提供階段白名單", async () => {
@@ -570,32 +610,112 @@ test("同一活動提交後 HTTP 與 Socket 老師視圖欄位一致", async () 
   });
 });
 
-test("HTTP server 重啟後活動與提交歸零，匯入題目集仍可讀取", async () => {
+test("HTTP server 重啟後保留搶答中活動與提交，即使原題目集檔案已刪除", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-restart-"));
   const questionDirectory = path.join(directory, "guided-notes");
   await mkdir(questionDirectory, { recursive: true });
   await writeFile(path.join(questionDirectory, "seed-set.json"), JSON.stringify(fixtureSet()));
-  let first: ReturnType<typeof createLiveBuzzerServer> | undefined = createLiveBuzzerServer({ teacherPin: PIN, dataDirectory: questionDirectory });
+  let restoredActivityCode = "";
+  const options = {
+    teacherPin: PIN,
+    dataDirectory: questionDirectory,
+    activityDataDirectory: directory,
+    resolveStudentSession: (token: string) => token === "team-a-session"
+      ? { activityCode: restoredActivityCode, groupId: "group-1" }
+      : undefined,
+  };
+  let first: ReturnType<typeof createLiveBuzzerServer> | undefined = createLiveBuzzerServer(options);
   let second: ReturnType<typeof createLiveBuzzerServer> | undefined;
   try {
     const firstBase = await first.listen(0);
-    const activity = first.manager.create(fixtureSet(), { activityCode: "2468" });
-    activity.stage = "buzzing";
-    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "will be cleared" }).accepted, true);
-    assert.equal(activity.submissions.get(1)?.size, 1);
-    await first.close();
-
-    second = createLiveBuzzerServer({ teacherPin: PIN, dataDirectory: questionDirectory });
-    const secondBase = await second.listen(0);
-    assert.equal(second.manager.getActive(), undefined);
-    const activityLookup = await fetch(`${secondBase}/api/student/activity?code=2468`);
-    assert.equal(activityLookup.status, 404);
-    assert.deepEqual(await activityLookup.json(), { error: "activity-not-found" });
-    const questionSets = await fetch(`${secondBase}/api/teacher/question-sets`, { headers: teacherHeaders() });
-    assert.deepEqual(await questionSets.json(), {
-      items: [{ id: "seed-set", sheetName: "種子題目", totalQuestionCount: 1, createdAt: "2026-11-22T00:00:00.000Z", source: "legacy" }],
+    const created = await fetch(`${firstBase}/api/teacher/activity`, {
+      method: "POST", headers: teacherHeaders(),
+      body: JSON.stringify({ questionSetId: "seed-set", groupNames: ["紅隊", "藍隊"], rankingRule: "cap" }),
     });
+    assert.equal(created.status, 201);
+    restoredActivityCode = (await created.json() as { activity: { activityCode: string } }).activity.activityCode;
+    const started = await fetch(`${firstBase}/api/teacher/start`, { method: "POST", headers: teacherHeaders(), body: "{}" });
+    assert.equal(started.status, 200);
+    const activity = first.manager.getActive()!;
+    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "will be restored" }).accepted, true);
+    const changed = await fetch(`${firstBase}/api/teacher/descriptions`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ visible: true }),
+    });
+    assert.equal(changed.status, 200);
+    const before = await (await fetch(`${firstBase}/api/teacher/view`, { headers: teacherHeaders() })).json() as { activity: unknown };
+    await rm(path.join(questionDirectory, "seed-set.json"));
+    await first.close();
     first = undefined;
+
+    second = createLiveBuzzerServer(options);
+    const secondBase = await second.listen(0);
+    const restored = second.manager.getActive();
+    assert.ok(restored);
+    assert.equal(restored.stage, "buzzing");
+    assert.equal(restored.rankingRule, "cap");
+    assert.equal(restored.showQuestionDescriptions, true);
+    assert.equal(restored.nextSubmissionSequence, 2);
+    assert.equal(restored.questionSet.questions[0]?.description, "HTTP 隔離題");
+    assert.equal(restored.submissions.get(1)?.get("group-1")?.answers[1], "will be restored");
+    const after = await (await fetch(`${secondBase}/api/teacher/view`, { headers: teacherHeaders() })).json() as { activity: unknown };
+    assert.deepEqual(after, before);
+    assert.deepEqual((after.activity as { groups: { onlineStudentPages: number }[] }).groups.map(({ onlineStudentPages }) => onlineStudentPages), [0, 0]);
+    const activityLookup = await fetch(`${secondBase}/api/student/activity?code=${restored.activityCode}`);
+    assert.equal(activityLookup.status, 200);
+    assert.deepEqual(await activityLookup.json(), { found: true, groups: [{ id: "group-1", name: "紅隊" }, { id: "group-2", name: "藍隊" }] });
+    const questionSets = await fetch(`${secondBase}/api/teacher/question-sets`, { headers: teacherHeaders() });
+    assert.deepEqual(await questionSets.json(), { items: [] });
+
+    const student = createClient(secondBase, {
+      transports: ["websocket"], reconnection: false,
+      auth: { role: "student", sessionToken: "team-a-session" },
+    });
+    const studentView = new Promise<void>((resolve) => student.once("activity:student-view", () => resolve()));
+    student.connect();
+    try {
+      await studentView;
+      const onlineView = await (await fetch(`${secondBase}/api/teacher/view`, { headers: teacherHeaders() })).json() as {
+        activity: { groups: { onlineStudentPages: number }[] };
+      };
+      assert.deepEqual(onlineView.activity.groups.map(({ onlineStudentPages }) => onlineStudentPages), [1, 0]);
+    } finally {
+      student.disconnect();
+    }
+  } finally {
+    if (second !== undefined) await second.close();
+    if (first !== undefined) await first.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("HTTP server 重啟後已結束活動維持階段並由提交重算順位與成功組", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "live-buzzer-ended-restart-"));
+  const questionDirectory = path.join(directory, "guided-notes");
+  await mkdir(questionDirectory, { recursive: true });
+  await writeFile(path.join(questionDirectory, "seed-set.json"), JSON.stringify(fixtureSet()));
+  const options = { teacherPin: PIN, dataDirectory: questionDirectory, activityDataDirectory: directory };
+  let first: ReturnType<typeof createLiveBuzzerServer> | undefined = createLiveBuzzerServer(options);
+  let second: ReturnType<typeof createLiveBuzzerServer> | undefined;
+  try {
+    const firstBase = await first.listen(0);
+    assert.equal((await fetch(`${firstBase}/api/teacher/activity`, {
+      method: "POST", headers: teacherHeaders(), body: JSON.stringify({ questionSetId: "seed-set", groupNames: ["紅隊", "藍隊"] }),
+    })).status, 201);
+    assert.equal((await fetch(`${firstBase}/api/teacher/start`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);
+    const activity = first.manager.getActive()!;
+    assert.equal(submitAnswers(activity, "group-2", 1, { 1: "第一順位" }).accepted, true);
+    assert.equal(submitAnswers(activity, "group-1", 1, { 1: "第二順位" }).accepted, true);
+    assert.equal((await fetch(`${firstBase}/api/teacher/end`, { method: "POST", headers: teacherHeaders(), body: "{}" })).status, 200);
+    const before = await (await fetch(`${firstBase}/api/teacher/view`, { headers: teacherHeaders() })).json();
+    await first.close();
+    first = undefined;
+
+    second = createLiveBuzzerServer(options);
+    const secondBase = await second.listen(0);
+    assert.equal(second.manager.getActive()?.stage, "ended");
+    assert.deepEqual(await (await fetch(`${secondBase}/api/teacher/view`, { headers: teacherHeaders() })).json(), before);
+    const restored = second.manager.getActive()!;
+    assert.deepEqual([...restored.submissions.values()].flatMap((groups) => [...groups.values()]).map(({ sequence }) => sequence), [1, 2]);
   } finally {
     if (second !== undefined) await second.close();
     if (first !== undefined) await first.close();

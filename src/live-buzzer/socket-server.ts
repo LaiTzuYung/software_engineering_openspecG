@@ -12,6 +12,7 @@ export interface StudentSocketIdentity {
 export interface LiveBuzzerSocketOptions {
   readonly teacherPin: string;
   readonly resolveStudentSession: (sessionToken: string) => StudentSocketIdentity | undefined;
+  readonly persistActivity?: (activity: ActivityState) => Promise<ActivityState>;
 }
 
 type SocketRole = "teacher" | "student" | "screen" | "anonymous";
@@ -130,6 +131,7 @@ export function createLiveBuzzerSocketServer(
   options: LiveBuzzerSocketOptions,
 ): Server {
   const io = new Server(httpServer, { serveClient: true });
+  const persistActivity = options.persistActivity ?? (async (activity) => activity);
 
   io.on("connection", (socket) => {
     const auth = socket.handshake.auth as AuthPayload;
@@ -184,7 +186,7 @@ export function createLiveBuzzerSocketServer(
       acknowledge(callback, { ok: true, view });
     });
 
-    socket.on("student:submit", (payload: unknown, callback: unknown) => {
+    socket.on("student:submit", async (payload: unknown, callback: unknown) => {
       if (!isStudent(socket)) {
         acknowledge(callback, { ok: false, reason: "unauthorized" });
         return;
@@ -202,13 +204,18 @@ export function createLiveBuzzerSocketServer(
         return;
       }
 
-      acknowledge(callback, { ok: true, questionNumber: result.submission.questionNumber });
-      broadcastStudentViews(io, activity, identity.groupId);
-      broadcastTeacherView(io, activity);
-      broadcastScreenView(io, activity);
+      try {
+        const persistedActivity = await persistActivity(activity);
+        acknowledge(callback, { ok: true, questionNumber: result.submission.questionNumber });
+        broadcastStudentViews(io, persistedActivity, identity.groupId);
+        broadcastTeacherView(io, persistedActivity);
+        broadcastScreenView(io, persistedActivity);
+      } catch {
+        acknowledge(callback, { ok: false, reason: "persistence-failed" });
+      }
     });
 
-    socket.on("teacher:start", (callback: unknown) => {
+    socket.on("teacher:start", async (callback: unknown) => {
       if (rejectTeacherAction(socket, callback)) return;
       const result = manager.transition("buzzing");
       if (!result.ok) {
@@ -216,13 +223,19 @@ export function createLiveBuzzerSocketServer(
         return;
       }
       const activity = getActiveActivity(manager)!;
-      acknowledge(callback, { ok: true, stage: activity.stage });
-      broadcastStudentViews(io, activity);
-      broadcastTeacherView(io, activity);
-      broadcastScreenView(io, activity);
+      try {
+        const persistedActivity = await persistActivity(activity);
+        acknowledge(callback, { ok: true, stage: persistedActivity.stage });
+        broadcastStudentViews(io, persistedActivity);
+        broadcastTeacherView(io, persistedActivity);
+        broadcastScreenView(io, persistedActivity);
+      } catch {
+        activity.stage = "preparing";
+        acknowledge(callback, { ok: false, reason: "persistence-failed" });
+      }
     });
 
-    socket.on("teacher:end", (callback: unknown) => {
+    socket.on("teacher:end", async (callback: unknown) => {
       if (rejectTeacherAction(socket, callback)) return;
       const result = manager.transition("ended");
       if (!result.ok) {
@@ -230,18 +243,26 @@ export function createLiveBuzzerSocketServer(
         return;
       }
       const activity = getActiveActivity(manager)!;
-      acknowledge(callback, { ok: true, stage: activity.stage });
-      broadcastStudentViews(io, activity);
-      broadcastTeacherView(io, activity);
-      broadcastScreenView(io, activity);
+      try {
+        const persistedActivity = await persistActivity(activity);
+        acknowledge(callback, { ok: true, stage: persistedActivity.stage });
+        broadcastStudentViews(io, persistedActivity);
+        broadcastTeacherView(io, persistedActivity);
+        broadcastScreenView(io, persistedActivity);
+      } catch {
+        activity.stage = "buzzing";
+        acknowledge(callback, { ok: false, reason: "persistence-failed" });
+      }
     });
 
-    socket.on("teacher:set-ranking-rule", (payload: unknown, callback: unknown) => {
+    socket.on("teacher:set-ranking-rule", async (payload: unknown, callback: unknown) => {
       if (rejectTeacherAction(socket, callback)) return;
       if (!isRankingRule(payload)) {
         acknowledge(callback, { ok: false, reason: "invalid-request" });
         return;
       }
+      const activityBeforeUpdate = getActiveActivity(manager);
+      const previousRule = activityBeforeUpdate?.rankingRule;
       const result = manager.setRankingRule(payload);
       if (!result.ok) {
         acknowledge(callback, result.reason === "ranking-rule-locked"
@@ -250,13 +271,19 @@ export function createLiveBuzzerSocketServer(
         return;
       }
       const activity = getActiveActivity(manager)!;
-      acknowledge(callback, { ok: true, rankingRule: result.rankingRule });
-      broadcastStudentViews(io, activity);
-      broadcastTeacherView(io, activity);
-      broadcastScreenView(io, activity);
+      try {
+        const persistedActivity = await persistActivity(activity);
+        acknowledge(callback, { ok: true, rankingRule: persistedActivity.rankingRule });
+        broadcastStudentViews(io, persistedActivity);
+        broadcastTeacherView(io, persistedActivity);
+        broadcastScreenView(io, persistedActivity);
+      } catch {
+        if (previousRule !== undefined) activity.rankingRule = previousRule;
+        acknowledge(callback, { ok: false, reason: "persistence-failed" });
+      }
     });
 
-    socket.on("teacher:set-question-descriptions", (payload: unknown, callback: unknown) => {
+    socket.on("teacher:set-question-descriptions", async (payload: unknown, callback: unknown) => {
       if (rejectTeacherAction(socket, callback)) return;
       if (typeof payload !== "boolean") {
         acknowledge(callback, { ok: false, reason: "invalid-request" });
@@ -267,11 +294,18 @@ export function createLiveBuzzerSocketServer(
         acknowledge(callback, { ok: false, reason: "activity-unavailable" });
         return;
       }
+      const previous = activity.showQuestionDescriptions;
       activity.showQuestionDescriptions = payload;
-      acknowledge(callback, { ok: true, visible: payload });
-      broadcastStudentViews(io, activity);
-      broadcastTeacherView(io, activity);
-      broadcastScreenView(io, activity);
+      try {
+        const persistedActivity = await persistActivity(activity);
+        acknowledge(callback, { ok: true, visible: payload });
+        broadcastStudentViews(io, persistedActivity);
+        broadcastTeacherView(io, persistedActivity);
+        broadcastScreenView(io, persistedActivity);
+      } catch {
+        activity.showQuestionDescriptions = previous;
+        acknowledge(callback, { ok: false, reason: "persistence-failed" });
+      }
     });
 
     socket.on("teacher:get-full-view", (callback: unknown) => {

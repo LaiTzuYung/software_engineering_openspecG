@@ -7,7 +7,8 @@ import { GuidedNotesImportService } from "../guided-notes/import-service.ts";
 import { createGoogleSheetsReader, createGoogleSheetsWriter } from "../guided-notes/google-sheets-adapter.ts";
 import { SpreadsheetExportPreviewService, SpreadsheetExportWriteError } from "../guided-notes/spreadsheet-export-validation.ts";
 import { createPreviewFromInput } from "../cli.ts";
-import { ActivityManager, transitionActivityStage, type RankingRule } from "./model.ts";
+import { ActivityManager, transitionActivityStage, type ActivityState, type RankingRule } from "./model.ts";
+import { ActivitySnapshotStore, createActivitySnapshot, restoreActivitySnapshot } from "./activity-persistence.ts";
 import { QuestionSetRepository } from "./question-sets.ts";
 import { broadcastScreenView, countOnlineStudentPages, createLiveBuzzerSocketServer } from "./socket-server.ts";
 import { createScreenView, createStudentStatusResponse, createStudentView, createTeacherView } from "./views.ts";
@@ -18,6 +19,8 @@ import { screenPage, studentPage, teacherLoginPage, teacherPage } from "./pages.
 export interface LiveBuzzerServerOptions {
   readonly teacherPin?: string;
   readonly dataDirectory?: string;
+  /** Root directory for the current-activity snapshot; defaults to <cwd>/data. */
+  readonly activityDataDirectory?: string;
   readonly importService?: GuidedNotesImportService;
   readonly readSpreadsheet?: (url: string) => Promise<GridSheet>;
   readonly writeSpreadsheetValues?: (
@@ -81,12 +84,25 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
   const teacherPin = options.teacherPin ?? process.env.TEACHER_PIN ?? randomBytes(4).toString("hex").toUpperCase();
   const manager = new ActivityManager();
   const dataDirectory = options.dataDirectory;
+  const activityStore = new ActivitySnapshotStore(options.activityDataDirectory);
   const repository = new QuestionSetRepository(dataDirectory);
   const importService = options.importService ?? new GuidedNotesImportService(dataDirectory);
   const exportReadSpreadsheet = options.readSpreadsheet ?? (async (url: string) =>
     (await createGoogleSheetsReader()).read(url));
   const exportPreviews = new SpreadsheetExportPreviewService(exportReadSpreadsheet);
   const studentSessions = new Map<string, { readonly activityCode: string; readonly groupId: string }>();
+  const persistActivity = async (activity: ActivityState): Promise<ActivityState> => {
+    const snapshot = createActivitySnapshot(activity, studentSessions);
+    await activityStore.save(snapshot);
+    return restoreActivitySnapshot(snapshot).activity;
+  };
+  let activitySnapshotLoaded = false;
+  const loadActivitySnapshot = async (): Promise<void> => {
+    if (activitySnapshotLoaded) return;
+    const restored = await activityStore.load();
+    manager.replace(restored?.activity);
+    activitySnapshotLoaded = true;
+  };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const route = url.pathname;
@@ -142,59 +158,92 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
           if (set === undefined) { sendJson(response, 404, { error: "question-set-not-found" }); return; }
           const groupNames = Array.isArray(body.groupNames) && body.groupNames.every((name) => typeof name === "string")
             ? body.groupNames as string[] : undefined;
+          const previousActivity = manager.getActive();
           const activity = manager.create(set, {
             ...(groupNames === undefined ? {} : { groupNames }),
             rankingRule,
           });
-          broadcastScreenView(socketServer, activity);
-          sendJson(response, 201, { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
+          let persistedActivity: ActivityState;
+          try {
+            persistedActivity = await persistActivity(activity);
+          } catch (error) {
+            manager.replace(previousActivity);
+            throw error;
+          }
+          broadcastScreenView(socketServer, persistedActivity);
+          sendJson(response, 201, { activity: createTeacherView(persistedActivity, countOnlineStudentPages(socketServer, persistedActivity)) }); return;
         }
         if (method === "POST" && route === "/api/teacher/ranking-rule") {
           const body = await readJson(request);
           if (!isRankingRule(body.rankingRule)) { sendJson(response, 400, { error: "invalid-request" }); return; }
+          const activityBeforeUpdate = manager.getActive();
+          const previousRule = activityBeforeUpdate?.rankingRule;
           const result = manager.setRankingRule(body.rankingRule);
           if (!result.ok) {
             sendJson(response, 409, { error: result.reason === "ranking-rule-locked" ? result.message : "activity-unavailable" }); return;
           }
           const activity = manager.getActive()!;
-          broadcastScreenView(socketServer, activity);
+          let persistedActivity: ActivityState;
+          try {
+            persistedActivity = await persistActivity(activity);
+          } catch (error) {
+            if (previousRule !== undefined) activity.rankingRule = previousRule;
+            throw error;
+          }
+          broadcastScreenView(socketServer, persistedActivity);
           for (const client of socketServer.sockets.sockets.values()) {
-            if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
-              const view = createStudentView(activity, client.data.studentIdentity.groupId);
+            if (client.data.role === "student" && client.data.studentIdentity?.activityCode === persistedActivity.activityCode) {
+              const view = createStudentView(persistedActivity, client.data.studentIdentity.groupId);
               if (view !== undefined) client.emit("activity:student-view", view);
             } else if (client.data.role === "teacher") {
-              client.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(socketServer, activity)));
+              client.emit("activity:teacher-view", createTeacherView(persistedActivity, countOnlineStudentPages(socketServer, persistedActivity)));
             }
           }
-          sendJson(response, 200, { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
+          sendJson(response, 200, { activity: createTeacherView(persistedActivity, countOnlineStudentPages(socketServer, persistedActivity)) }); return;
         }
         if (method === "POST" && (route === "/api/teacher/start" || route === "/api/teacher/end")) {
           const activity = manager.getActive();
+          const previousStage = activity?.stage;
           const result = manager.transition(route.endsWith("/start") ? "buzzing" : "ended");
           if (!result.ok || activity === undefined) { sendJson(response, 409, { error: "invalid-transition" }); return; }
-          const io = socketServer;
-          broadcastScreenView(io, activity);
-          for (const client of io.sockets.sockets.values()) {
-            if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
-              const view = createStudentView(activity, client.data.studentIdentity.groupId);
-              if (view !== undefined) client.emit("activity:student-view", view);
-            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(io, activity)));
+          let persistedActivity: ActivityState;
+          try {
+            persistedActivity = await persistActivity(activity);
+          } catch (error) {
+            if (previousStage !== undefined) activity.stage = previousStage;
+            throw error;
           }
-          sendJson(response, 200, { activity: createTeacherView(activity, countOnlineStudentPages(io, activity)) }); return;
+          const io = socketServer;
+          broadcastScreenView(io, persistedActivity);
+          for (const client of io.sockets.sockets.values()) {
+            if (client.data.role === "student" && client.data.studentIdentity?.activityCode === persistedActivity.activityCode) {
+              const view = createStudentView(persistedActivity, client.data.studentIdentity.groupId);
+              if (view !== undefined) client.emit("activity:student-view", view);
+            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(persistedActivity, countOnlineStudentPages(io, persistedActivity)));
+          }
+          sendJson(response, 200, { activity: createTeacherView(persistedActivity, countOnlineStudentPages(io, persistedActivity)) }); return;
         }
         if (method === "POST" && route === "/api/teacher/descriptions") {
           const body = await readJson(request);
           const activity = manager.getActive();
           if (activity === undefined || typeof body.visible !== "boolean") { sendJson(response, 409, { error: "invalid-request" }); return; }
+          const previous = activity.showQuestionDescriptions;
           activity.showQuestionDescriptions = body.visible;
-          broadcastScreenView(socketServer, activity);
-          for (const client of socketServer.sockets.sockets.values()) {
-            if (client.data.role === "student" && client.data.studentIdentity?.activityCode === activity.activityCode) {
-              const view = createStudentView(activity, client.data.studentIdentity.groupId);
-              if (view !== undefined) client.emit("activity:student-view", view);
-            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(activity, countOnlineStudentPages(socketServer, activity)));
+          let persistedActivity: ActivityState;
+          try {
+            persistedActivity = await persistActivity(activity);
+          } catch (error) {
+            activity.showQuestionDescriptions = previous;
+            throw error;
           }
-          sendJson(response, 200, { activity: createTeacherView(activity, countOnlineStudentPages(socketServer, activity)) }); return;
+          broadcastScreenView(socketServer, persistedActivity);
+          for (const client of socketServer.sockets.sockets.values()) {
+            if (client.data.role === "student" && client.data.studentIdentity?.activityCode === persistedActivity.activityCode) {
+              const view = createStudentView(persistedActivity, client.data.studentIdentity.groupId);
+              if (view !== undefined) client.emit("activity:student-view", view);
+            } else if (client.data.role === "teacher") client.emit("activity:teacher-view", createTeacherView(persistedActivity, countOnlineStudentPages(socketServer, persistedActivity)));
+          }
+          sendJson(response, 200, { activity: createTeacherView(persistedActivity, countOnlineStudentPages(socketServer, persistedActivity)) }); return;
         }
         if (method === "GET" && route === "/api/teacher/view") {
           const activity = manager.getActive();
@@ -369,6 +418,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
   });
   const socketServer = createLiveBuzzerSocketServer(server, manager, {
     teacherPin,
+    persistActivity,
     resolveStudentSession: (token) => studentSessions.get(token) ?? options.resolveStudentSession?.(token),
   });
   return {
@@ -376,6 +426,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
     manager,
     teacherPin,
     async listen(port = 3000, host = "127.0.0.1"): Promise<string> {
+      await loadActivitySnapshot();
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(port, host, () => { server.off("error", reject); resolve(); });
@@ -384,6 +435,7 @@ export function createLiveBuzzerServer(options: LiveBuzzerServerOptions = {}): L
       return `http://${host}:${address.port}`;
     },
     async close(): Promise<void> {
+      await activityStore.flush();
       await new Promise<void>((resolve, reject) => socketServer.close((error) => error ? reject(error) : resolve()));
     },
   };

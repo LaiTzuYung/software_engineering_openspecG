@@ -111,6 +111,11 @@ export class ActivityManager {
     return this.current;
   }
 
+  /** Replaces the in-memory activity after validating and loading a durable snapshot. */
+  replace(activity: ActivityState | undefined): void {
+    this.current = activity;
+  }
+
   create(questionSet: GuidedNotesQuestionSet, options: CreateActivityOptions = {}): ActivityState {
     const activity = createActivityState(questionSet, options);
     this.current = activity;
